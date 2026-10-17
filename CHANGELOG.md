@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.1.1] — 2026-10-17
+
+- pkg 地板 v0.10.0 → v0.11.0
+
 ## [v0.1.0] — 2026-10-17
 
 - **feat(uidgen)**: 初始版本——自 `oekit/pkg` 拆出。Snowflake（全局单例 +
