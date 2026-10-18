@@ -1,16 +1,17 @@
 # AGENTS.md — oekit/kitx
 
-> 标识与校验——uidgen（Snowflake 全局单例+Extract 元数据、手写 RFC 4122 v4 UUID 零第三方依赖、RandomHex/RandomString 拒绝采样随机串）+ validator（go-playground/validator v10 接口化门面：struct tag 校验/自定义规则注册/ValidationError Unwrap 为 BizError 400 对接 middleware.Fail），自 pkg v0.10.0 拆出
+> 标识与校验——uidgen（Snowflake 全局单例+Extract 元数据、手写 RFC 4122 v4 UUID 零第三方依赖、RandomHex/RandomString 拒绝采样随机串）+ validator（go-playground/validator v10 接口化门面：struct tag 校验/自定义规则注册/ValidationError Unwrap 为 BizError 400 对接 middleware.Fail）+ hash（v0.2.0 起非密码学哈希助手 Md5Hex/Md5Bytes——缓存键/幂等键/短唯一 code，格式稳定承诺，pkg 2026-09-15 治理移除弱哈希后 kitx 侧收编 pkg#10），自 pkg v0.10.0 拆出
 > 当前版本：`v0.2.0` · module：`github.com/oekit/kitx` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
-`./`、`uidgen/`、`validator/`、`hash/`
+`./`、`hash/`、`uidgen/`、`validator/`
 
 ## 硬规则速览（全矩阵适用）
 
 ### 分层与依赖
 - 依赖严格自底向上，禁止反向依赖；本仓的矩阵内依赖见 README「矩阵总览」表
 - 微工具集统一在 `github.com/oekit/pkg`；本仓新增基础工具前先确认 pkg 里没有
+- `pkg` 是**零第三方依赖仓**（go.mod 零 require，仅标准库，CI 强制）——需要三方能力的基础工具拆独立仓（先例：kitx）
 
 ### 错误处理
 - 一律使用 `github.com/oekit/pkg/errors`：`errors.Wrap(err, "ctx", kv...)`（nil-safe）、
@@ -31,7 +32,7 @@
 
 ### 生命周期
 - 组件 Close 统一 `Close(ctx) error` 签名 + sync.Once 幂等
-- 应用骨架用 `github.com/oekit/bootstrap（New + Run(fn)，v0.4.0 起无 Run(Config)）`；**userFn 返回即服务结束，
+- 应用骨架用 `github.com/oekit/bootstrap/bootstrap.Run`；**userFn 返回即服务结束，
   长驻服务必须 `<-app.Context().Done()` 阻塞**
 
 ### Option 与命名
@@ -39,7 +40,13 @@
 - 导出符号 PascalCase + godoc 注释；包文档放 doc.go
 
 ### 版本与发版
-- SemVer；0.x 阶段 minor 允许 breaking；发版 = 打 annotated tag 推远端（CI 自动跑 lint+test）
+- SemVer；0.x 阶段 minor 允许 breaking
+- **main 受分支保护，改动一律走 PR，管理员也不例外**（`enforce_admins=true`，
+  直推会被 `GH006 Changes must be made through a pull request` 拒掉）
+- 发版流程：建分支 → 提交 → 开 PR → CI（`Lint & Test / Lint` + `Lint & Test / Test`）
+  绿 → 合入 main → **合入之后**再打 annotated tag 推远端
+- tag 不走 PR（`protect-release-tags` ruleset 管的是不可删/不可改，不是审批）；
+  tag 必须落在已合入 main 的 commit 上，否则 `go get` 拉到的是没进过 CI 的代码
 - module 路径 = `github.com/oekit/<name>`；**改 module 路径必须同步**：
   全部 import、go.mod、README 安装行、logx caller 启发式（若涉及 logx）
 
