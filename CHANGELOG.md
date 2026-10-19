@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.2.1] — 2026-10-19
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.11.0 → v0.15.1
+
 ## [v0.2.0] — 2026-10-18
 
 ### feat(hash)：非密码学哈希助手 `Md5Hex`/`Md5Bytes`（oekit/pkg#10）
