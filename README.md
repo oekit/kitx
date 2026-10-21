@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/kitx@v0.2.1
+go get github.com/oekit/kitx@v0.3.0
 ```
 
 ## 这个仓库做什么
