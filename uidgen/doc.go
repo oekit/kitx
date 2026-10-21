@@ -15,4 +15,11 @@
 //	uidgen.ExtractSequence(id)
 //
 // UUID 系列（与 Snowflake 无关）见 uuid.go.
+//
+// ULID 系列（26 字符，字典序 == 时间序）见 ulid.go——面向「文本主键 +
+// 按 ID 做时间序 range scan」的场景：
+//
+//	id := uidgen.ULID()                       // 26 字符，同毫秒内严格递增
+//	uidgen.ULIDFromTime(t)                   // 指定时间戳（按业务时间回填）
+//	ts, entropy, err := uidgen.ParseULID(id)  // 解回时间戳与 80 bit 熵
 package uidgen
