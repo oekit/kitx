@@ -3,6 +3,14 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.3.0] — 2026-10-21
+
+- feat(uidgen)：补 ULID 原语——26 字符、字典序 = 时间序的字符串 ID（#17）
+- `ULID()`：48 bit 毫秒时间戳 + 80 bit 熵，Crockford Base32 编码；字母表按 ASCII 升序，故字典序 == 时间序，可在 text 主键列上直接 range scan
+- 同毫秒内进程内严格单调（熵逐个递增，80 bit 用尽则进位到下一毫秒）；时钟回拨时冻结在上次的毫秒继续递增熵，保证不出现更小的 ID
+- `ULIDFromTime(t)`：按业务时间回填（熵随机，不混入单调序列）；`ParseULID(s)`：解回毫秒时间戳与 80 bit 熵，大小写不敏感
+- 零第三方依赖（crypto/rand + 标准库位运算）；位布局与 oklog/ulid 逐位兼容（以其权威向量钉死）
+
 ## [v0.2.1] — 2026-10-19
 
 - build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.11.0 → v0.15.1
