@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.3.1] — 2026-10-23
+
+- build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.15.1 → v0.22.0（#26）
+
 ## [v0.3.0] — 2026-10-21
 
 - feat(uidgen)：补 ULID 原语——26 字符、字典序 = 时间序的字符串 ID（#17）
