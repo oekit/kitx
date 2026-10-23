@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # 全量分组：每周外部+内部依赖合并为一个 PR，
+  # 组合兼容性由该 PR 的 CI 一次验证，避免逐包 PR 洪峰（34+ PR 那种）。
+  # 本文件在 2026-10-17 从 pkg 拆出本仓时遗漏，2026-10-23 补回。
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    # 地板约束：基础层地板硬钉 1.24（口径以 matrix-tools/matrix.py 的
+    # GO_FLOOR_BASE_LAYER / GO_FLOOR_BASE_MAX 为唯一事实源；门禁 audit.py 的
+    # check_go_floor_pairing 会把「基础层地板 > 1.24」判红，因为基础包地板抬高
+    # 会传染全部下游）。
+    # github.com/go-playground/validator/v10 从 v10.30.2 起要求 go>=1.25
+    # （v10.30.5 要求 go 1.26），而 dependabot 升级依赖时会**顺手把本仓 go.mod 的
+    # go 指令抬到新依赖要求的高度**（实测 2026-10-21 metrics 的 dependabot PR #24
+    # 的 diff：go 1.24.0 → go 1.26.0）⇒ CI 用 1.24 工具链（GOTOOLCHAIN=local）
+    # 读一个声明 1.26 的 go.mod，必然报 "go: go.mod requires go >= 1.26.0"，
+    # 升级按当前口径无法合入。
+    # 这里显式 ignore 掉越界版本：bot 不再产出按当前口径必然失败的升级，
+    # 其余可兼容依赖照常升级（本仓的内部依赖 github.com/oekit/pkg 最新版 go 指令
+    # 仍是 1.24，可正常升级）。
+    # 边界取 v10.30.2（首个要求 go>=1.25 的版本），不是 v10.30.5——v10.30.2 同样
+    # 超地板，写 ">= 10.30.5" 会让 bot 继续提议 v10.30.2。
+    # 只锁这一个依赖：kitx 的直接依赖只有 validator 与内部 oekit/pkg，
+    # 间接依赖（x/crypto、x/sys、x/text、mimetype、locales）只随直接依赖搭车，
+    # validator 被锁后搭车链就断了。
+    # 解锁条件：本仓地板抬到 1.25+ 时删除本条 ignore，并同步 CI 的 go-version
+    # （两者必须成对，否则最低支持版本从未被验证）。
+    ignore:
+      - dependency-name: "github.com/go-playground/validator/v10"
+        versions: [">= 10.30.2"]
+    groups:
+      all-deps:
+        patterns:
+          - "*"
