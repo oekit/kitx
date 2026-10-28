@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.3.3] — 2026-10-28
+
+- feat(validator): 新增 `ValidateVarNamed(field, fieldName, tag)`——单变量校验此前**丢掉字段名**（底层 go-playground/validator 的 Var 路径不返回字段名）⇒ 错误消息是 " is required"（前导空格、没有主语），`ValidationError.Map()` 还多出一个空字符串键 ⇒ 直接喂 JSON 响应会得到 `{"": " is required"}`。走可选接口 `VarValidatorWithName`（不给 `Validator` 接口加方法，仓外自定义实现不受影响）；无名路径用兜底主语 "value"，结构体校验路径不变
+
 ## [v0.3.2] — 2026-10-28
 
 - fix(validator): `SetDefault(nil)` 把 nil 接口存进全局 ⇒ `Default()` 返回 nil ⇒ 后续每一次 `Default().Validate(obj)` 都是**空指针崩溃**，而且崩在调用方、栈里只有 `validator.Default().Validate` 这一行，完全看不出根因是这里存了个 nil。改为**直接 panic**（快速失败比静默埋雷好）；`Default()` 另加兜底——atomic 指针为空时返回一个可用的默认验证器，而不是在解引用处崩
