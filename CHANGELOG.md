@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.3.2] — 2026-10-28
+
+- fix(validator): `SetDefault(nil)` 把 nil 接口存进全局 ⇒ `Default()` 返回 nil ⇒ 后续每一次 `Default().Validate(obj)` 都是**空指针崩溃**，而且崩在调用方、栈里只有 `validator.Default().Validate` 这一行，完全看不出根因是这里存了个 nil。改为**直接 panic**（快速失败比静默埋雷好）；`Default()` 另加兜底——atomic 指针为空时返回一个可用的默认验证器，而不是在解引用处崩
+
 ## [v0.3.1] — 2026-10-23
 
 - build: 矩阵内依赖地板对齐（align_floors 不动点）：pkg v0.15.1 → v0.22.0（#26）
