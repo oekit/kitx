@@ -58,7 +58,31 @@ func (pv *PlaygroundValidator) Validate(obj any) error {
 }
 
 // ValidateVar 验证单个变量。
+//
+// **没有字段名可用**：底层 go-playground/validator 的 Var 路径不提供字段名
+// （fe.Field() 为空串）⇒ 此前错误消息是 " is required"（前导空格、没有主语），
+// ValidationError.Map() 还会多出一个空字符串键 ""。这里用 "value" 作兜底主语；
+// 需要真实字段名请用 ValidateVarNamed。
 func (pv *PlaygroundValidator) ValidateVar(field any, tag string) error {
+	return pv.validateVar(field, defaultVarFieldName, tag)
+}
+
+// ValidateVarNamed 验证单个变量并带上字段名。
+//
+// 错误消息的主语与 ValidationError.Map() 的键都用 fieldName——
+// 单变量校验最常见的用法（逐字段校验请求参数）需要知道是**哪个**字段没过。
+func (pv *PlaygroundValidator) ValidateVarNamed(field any, fieldName string, tag string) error {
+	if fieldName == "" {
+		fieldName = defaultVarFieldName
+	}
+	return pv.validateVar(field, fieldName, tag)
+}
+
+// validateVar 执行单变量校验并组装结构化错误。
+//
+// fieldName 只在底层给不出字段名（Var 路径）时兜底；结构体校验路径
+// （Validate）始终用真实的结构体字段名。
+func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag string) error {
 	err := pv.validate.Var(field, tag)
 	if err == nil {
 		return nil
@@ -71,11 +95,15 @@ func (pv *PlaygroundValidator) ValidateVar(field any, tag string) error {
 
 	fieldErrors := make([]FieldError, 0, len(validationErrors))
 	for _, fe := range validationErrors {
+		name := fe.Field()
+		if name == "" {
+			name = fieldName
+		}
 		fieldErrors = append(fieldErrors, FieldError{
-			Field:   fe.Field(),
+			Field:   name,
 			Tag:     fe.Tag(),
 			Param:   fe.Param(),
-			Message: formatMessage(fe),
+			Message: formatMessageNamed(fe, name),
 		})
 	}
 
@@ -103,9 +131,29 @@ func (pv *PlaygroundValidator) Validate_() *validator.Validate {
 	return pv.validate
 }
 
-// formatMessage 生成友好的错误消息。
+// defaultVarFieldName 是单变量校验在拿不到字段名时的兜底主语。
+//
+// 底层 go-playground/validator 的 Var 路径不返回字段名（fe.Field() == ""），
+// 直接用会得到 " is required" 这种前导空格的残缺消息，以及 Map() 里的空键。
+const defaultVarFieldName = "value"
+
+// formatMessage 生成友好的错误消息（字段名取底层的 fe.Field()）。
 func formatMessage(fe validator.FieldError) string {
-	field := fe.Field()
+	return formatMessageNamed(fe, fe.Field())
+}
+
+// formatMessageNamed 生成友好的错误消息，字段名用 name。
+//
+// name 为空时依次回退 fe.Field() 与 defaultVarFieldName ⇒ 消息永远有主语，
+// 不会出现 " is required" 这种残缺文本。
+func formatMessageNamed(fe validator.FieldError, name string) string {
+	if name == "" {
+		name = fe.Field()
+	}
+	if name == "" {
+		name = defaultVarFieldName
+	}
+	field := name
 	tag := fe.Tag()
 
 	switch tag {

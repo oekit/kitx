@@ -9,7 +9,8 @@
 //     （RandomHex / 拒绝采样 RandomString）
 //   - validator：go-playground/validator 接口化门面——struct tag 校验、
 //     自定义规则注册、ValidationError（Unwrap 为 pkg/errors BizError 400，
-//     middleware.Fail 自动映射 HTTP 400）
+//     middleware.Fail 自动映射 HTTP 400）；单变量校验用 ValidateVarNamed
+//     带字段名（ValidateVar 的字段名退化为兜底主语 "value"）
 //
 // 基础微工具（errors/stringx/timex/container 等）仍在 github.com/oekit/pkg。
 package kitx
