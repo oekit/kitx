@@ -31,13 +31,28 @@ func init() {
 }
 
 // SetDefault 设置全局默认验证器。
+//
+// v 为 nil 时**直接 panic**：存进去之后，Default() 会返回 nil 接口，
+// 后续每一次 Default().Validate(obj) 都是空指针崩溃——崩在调用方、栈里只看
+// 得到「validator.Default().Validate」这一行，完全看不出是这里存了个 nil。
+// 快速失败比静默埋雷好。
 func SetDefault(v Validator) {
+	if v == nil {
+		panic("validator: SetDefault(nil) —— 默认验证器不能为 nil")
+	}
 	defaultValidator.Store(&v)
 }
 
 // Default 获取全局默认验证器。
+//
+// 兜底：atomic 指针为空时（理论上只有 init 之前才可能）返回一个可用的默认
+// 验证器，而不是在解引用处空指针崩溃。
 func Default() Validator {
-	return *defaultValidator.Load()
+	p := defaultValidator.Load()
+	if p == nil || *p == nil {
+		return New()
+	}
+	return *p
 }
 
 // Validate 验证结构体。
