@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/kitx
 
 > 标识与校验——uidgen（Snowflake 全局单例+Extract 元数据、手写 RFC 4122 v4 UUID 零第三方依赖、RandomHex/RandomString 拒绝采样随机串）+ validator（go-playground/validator v10 接口化门面：struct tag 校验/自定义规则注册/ValidationError Unwrap 为 BizError 400 对接 middleware.Fail）+ hash（v0.2.0 起非密码学哈希助手 Md5Hex/Md5Bytes——缓存键/幂等键/短唯一 code，格式稳定承诺，pkg 2026-09-15 治理移除弱哈希后 kitx 侧收编 pkg#10），自 pkg v0.10.0 拆出
-> 当前版本：`v0.3.2` · module：`github.com/oekit/kitx` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.3.3` · module：`github.com/oekit/kitx` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `./`、`hash/`、`uidgen/`、`validator/`
