@@ -3,6 +3,10 @@
 由 oekit/pkg v0.10.0 拆分而来（uidgen、validator 两包）。所有 notable 变更记录如下。
 
 
+## [v0.3.4] — 2026-11-02
+
+- build: 矩阵内依赖地板 `pkg` v0.31.0 → v0.31.1（维护轮全量对齐；本版不含 API 变更）
+
 ## [v0.3.3] — 2026-10-28
 
 - feat(validator): 新增 `ValidateVarNamed(field, fieldName, tag)`——单变量校验此前**丢掉字段名**（底层 go-playground/validator 的 Var 路径不返回字段名）⇒ 错误消息是 " is required"（前导空格、没有主语），`ValidationError.Map()` 还多出一个空字符串键 ⇒ 直接喂 JSON 响应会得到 `{"": " is required"}`。走可选接口 `VarValidatorWithName`（不给 `Validator` 接口加方法，仓外自定义实现不受影响）；无名路径用兜底主语 "value"，结构体校验路径不变
