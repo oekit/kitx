@@ -5,13 +5,19 @@ package uidgen
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strconv"
 )
 
-// RandomHex n 字节 crypto/rand 随机数的十六进制串（2n 字符）。n<=0 返回空串。
-// 适用：对象 ID、webhook secret 等高熵标识符。
+// RandomHex n 字节 crypto/rand 随机数的十六进制串（2n 字符）。
+// nBytes <= 0 直接 panic（#50）：对标识符场景「非法长度=调用方 bug」，对密钥/
+// 凭据场景静默空串是**最危险的缺省**——「名义生成了、实际是空钥匙」（空串做
+// HMAC key / API token 落库后患无穷），与 RandomString 空 alphabet 的防呆哲学
+// 对齐：非法入参启动即暴露好过静默降级。长度来自配置面时请在构造期校验。
+//
+// 适用：对象 ID、webhook secret、审批 HMAC 密钥等高熵标识符与密钥面。
 func RandomHex(nBytes int) string {
 	if nBytes <= 0 {
-		return ""
+		panic("uidgen: RandomHex 字节数必须为正（got " + strconv.Itoa(nBytes) + "）——空串密钥是最危险的缺省，密钥/凭据场景漏个非正长度必须当场暴露")
 	}
 	b := make([]byte, nBytes)
 	if _, err := rand.Read(b); err != nil {

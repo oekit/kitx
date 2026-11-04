@@ -12,8 +12,21 @@ func TestRandomHexLengthAndCharset(t *testing.T) {
 			t.Fatalf("非 hex 字符 %q", c)
 		}
 	}
-	if RandomHex(0) != "" {
-		t.Fatal("nBytes<=0 应返回空串")
+}
+
+// TestRandomHexNonPositivePanics 锁定 #50：nBytes<=0 panic——空串密钥是最危险
+// 的缺省（「名义生成了、实际是空钥匙」），与 RandomString 空 alphabet 的防呆
+// 哲学对齐；矩阵内无调用方依赖旧「静默空串」行为（全仓 grep 核过）。
+func TestRandomHexNonPositivePanics(t *testing.T) {
+	for _, n := range []int{0, -1, -32} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RandomHex(%d) 应 panic（空串密钥危险缺省）", n)
+				}
+			}()
+			RandomHex(n)
+		}()
 	}
 }
 
