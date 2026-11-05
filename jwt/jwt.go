@@ -1,0 +1,186 @@
+// Package jwt 提供 RS256 的 JWT 签发与校验。
+//
+// 硬契约（与既有消费方互通，不可改）：
+//   - alg 恰为 RS256
+//   - JWT header 只含 {"alg":"RS256"}，不带 typ
+//   - 业务自定义声明平铺进 payload，解析时收集进 Claims.Extra
+package jwt
+
+import (
+	"crypto/rsa"
+	"errors"
+	"fmt"
+	"time"
+
+	gojwt "github.com/golang-jwt/jwt/v5"
+)
+
+// ErrInvalidToken 表示令牌无法解析或校验失败。
+var ErrInvalidToken = errors.New("jwt: invalid token")
+
+// Claims 是签发与解析的载荷容器。
+type Claims struct {
+	gojwt.RegisteredClaims
+	// Extra 承载业务自定义声明（签发时经 WithClaim 平铺进 payload，解析时收集回来）。
+	Extra map[string]any
+}
+
+// signOptions 是签发选项的内部表示。
+type signOptions struct {
+	issuer    string
+	subject   string
+	jti       string
+	ttl       time.Duration
+	notBefore *time.Time
+	claims    map[string]any
+}
+
+// SignOption 是 Sign 的函数选项。
+type SignOption func(*signOptions)
+
+// WithIssuer 设置 iss。
+func WithIssuer(iss string) SignOption { return func(o *signOptions) { o.issuer = iss } }
+
+// WithSubject 设置 sub。
+func WithSubject(sub string) SignOption { return func(o *signOptions) { o.subject = sub } }
+
+// WithJTI 设置 jti（令牌 ID）。
+func WithJTI(jti string) SignOption { return func(o *signOptions) { o.jti = jti } }
+
+// WithTTL 设置 exp = iat + ttl。零值 = 不写 exp。
+func WithTTL(d time.Duration) SignOption { return func(o *signOptions) { o.ttl = d } }
+
+// WithNotBefore 设置 nbf。
+func WithNotBefore(t time.Time) SignOption { return func(o *signOptions) { o.notBefore = &t } }
+
+// WithClaim 追加一个业务自定义声明。
+func WithClaim(key string, val any) SignOption {
+	return func(o *signOptions) { o.claims[key] = val }
+}
+
+// Sign 用 RS256 签发令牌。iat 恒为当前时刻；ttl 缺省 24h。
+func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
+	if kp == nil || kp.Private == nil {
+		return "", fmt.Errorf("%w: 缺少私钥", ErrInvalidToken)
+	}
+	o := &signOptions{ttl: 24 * time.Hour, claims: map[string]any{}}
+	for _, opt := range opts {
+		opt(o)
+	}
+	now := time.Now()
+	payload := map[string]any{}
+	if o.issuer != "" {
+		payload["iss"] = o.issuer
+	}
+	if o.subject != "" {
+		payload["sub"] = o.subject
+	}
+	if o.jti != "" {
+		payload["jti"] = o.jti
+	}
+	if o.ttl != 0 {
+		payload["exp"] = now.Add(o.ttl).Unix()
+	}
+	payload["iat"] = now.Unix()
+	if o.notBefore != nil {
+		payload["nbf"] = o.notBefore.Unix()
+	}
+	for k, v := range o.claims {
+		payload[k] = v
+	}
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, gojwt.MapClaims(payload))
+	tok.Header = map[string]any{"alg": "RS256"} // 硬契约：header 只含 alg
+	return tok.SignedString(kp.Private)
+}
+
+// parseOptions 是解析选项的内部表示。
+type parseOptions struct {
+	leeway time.Duration
+}
+
+// ParseOption 是 Parse 的函数选项。
+type ParseOption func(*parseOptions)
+
+// WithLeeway 设置时钟偏移容忍。
+func WithLeeway(d time.Duration) ParseOption { return func(o *parseOptions) { o.leeway = d } }
+
+// Parse 校验并解析令牌（RS256-only，缺省零 leeway）。
+//
+// 已注册声明（iss/sub/jti/exp/iat/nbf）收进 RegisteredClaims；其余（含 aud）进 Extra。
+func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, error) {
+	if pub == nil {
+		return nil, fmt.Errorf("%w: 缺少公钥", ErrInvalidToken)
+	}
+	o := &parseOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	parser := gojwt.NewParser(gojwt.WithValidMethods([]string{"RS256"}), gojwt.WithLeeway(o.leeway))
+	tok, err := parser.Parse(token, func(t *gojwt.Token) (any, error) {
+		return pub, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	mc, ok := tok.Claims.(gojwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("%w: 载荷类型异常", ErrInvalidToken)
+	}
+	out := &Claims{Extra: map[string]any{}}
+	out.RegisteredClaims = gojwt.RegisteredClaims{
+		Issuer:    mapStr(mc, "iss"),
+		Subject:   mapStr(mc, "sub"),
+		ID:        mapStr(mc, "jti"),
+		ExpiresAt: mapTime(mc, "exp"),
+		IssuedAt:  mapTime(mc, "iat"),
+		NotBefore: mapTime(mc, "nbf"),
+	}
+	if aud, ok := mc["aud"]; ok {
+		if s, ok := aud.(string); ok {
+			out.Audience = gojwt.ClaimStrings{s}
+		} else {
+			out.Audience = gojwt.ClaimStrings{}
+			if arr, ok := aud.([]any); ok {
+				for _, a := range arr {
+					if s, ok := a.(string); ok {
+						out.Audience = append(out.Audience, s)
+					}
+				}
+			}
+		}
+	}
+	for k, v := range mc {
+		switch k {
+		case "iss", "sub", "jti", "exp", "iat", "nbf", "aud":
+		default:
+			out.Extra[k] = v
+		}
+	}
+	return out, nil
+}
+
+// mapStr 取 string 声明（缺失或类型异常返回空串）。
+func mapStr(mc gojwt.MapClaims, key string) string {
+	v, ok := mc[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// mapTime 取数字时间声明（缺失或类型异常返回 nil）。
+func mapTime(mc gojwt.MapClaims, key string) *gojwt.NumericDate {
+	v, ok := mc[key]
+	if !ok {
+		return nil
+	}
+	switch n := v.(type) {
+	case float64:
+		return gojwt.NewNumericDate(time.Unix(int64(n), 0))
+	case int64:
+		return gojwt.NewNumericDate(time.Unix(n, 0))
+	default:
+		return nil
+	}
+}

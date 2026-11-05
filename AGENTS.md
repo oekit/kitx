@@ -4,7 +4,7 @@
 > 当前版本：`v0.3.5` · module：`github.com/oekit/kitx` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
-`./`、`hash/`、`uidgen/`、`validator/`
+`./`、`hash/`、`uidgen/`、`validator/`、`jwt/`
 
 ## 硬规则速览（全矩阵适用）
 
