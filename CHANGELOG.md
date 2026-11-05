@@ -1,3 +1,7 @@
+## [v0.3.6] — 2026-11-06
+
+- build: 矩阵依赖地板对齐（维护轮 #233）
+
 ## [v0.3.5] — 2026-11-05
 
 - **BREAKING** fix(uidgen): `RandomHex(nBytes<=0)` 从静默返回空串改为 **panic**（[#50](https://github.com/oekit/kitx/issues/50)）——对标识符场景「非法长度=调用方 bug」，对 doc 同样点名的密钥/凭据场景（webhook secret、HMAC key、API token）静默空串是**最危险的缺省**：名义生成了、实际是空钥匙，空串做 HMAC key / API token 落库后患无穷，而宿主（bianque `deploy.GenerateSecret`）被迫自包 `nBytes<=0` 特判。与同包 `RandomString` 空 alphabet panic 的防呆哲学对齐（非法入参启动即暴露好过静默降级）；panic 消息点名「空串密钥是最危险的缺省」。迁移：长度来自配置面的调用方在构造期校验；矩阵全仓 grep 核过无调用方依赖旧「静默空串」行为
