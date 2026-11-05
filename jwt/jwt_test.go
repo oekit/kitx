@@ -1,0 +1,205 @@
+package jwt
+
+import (
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	gojwt "github.com/golang-jwt/jwt/v5"
+)
+
+// newTestKeyPair 生成测试用密钥对。
+func newTestKeyPair(t *testing.T) *KeyPair {
+	t.Helper()
+	kp, err := GenerateKeyPair(2048)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair() error = %v", err)
+	}
+	return kp
+}
+
+// decodeSegment 解 JWT 的某一段（raw url base64）。
+func decodeSegment(t *testing.T, token string, idx int) map[string]any {
+	t.Helper()
+	parts := splitToken(token)
+	if len(parts) != 3 {
+		t.Fatalf("token parts = %d, want 3", len(parts))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[idx])
+	if err != nil {
+		t.Fatalf("decode segment %d: %v", idx, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal segment %d: %v", idx, err)
+	}
+	return m
+}
+
+// splitToken 按 '.' 切 JWT 三段。
+func splitToken(token string) []string { return strings.Split(token, ".") }
+
+func TestSignParseRoundTrip(t *testing.T) {
+	kp := newTestKeyPair(t)
+	token, err := Sign(kp,
+		WithIssuer("self"),
+		WithSubject("user-1"),
+		WithJTI("jti-1"),
+		WithTTL(time.Hour),
+		WithClaim("un", "alice"),
+		WithClaim("source", "dao"),
+		WithClaim("mfaVerified", true),
+	)
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+
+	got, err := Parse(token, kp.Public)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Issuer != "self" {
+		t.Fatalf("Issuer = %q, want self", got.Issuer)
+	}
+	if got.Subject != "user-1" {
+		t.Fatalf("Subject = %q, want user-1", got.Subject)
+	}
+	if got.ID != "jti-1" {
+		t.Fatalf("ID = %q, want jti-1", got.ID)
+	}
+	if got.Extra["un"] != "alice" {
+		t.Fatalf("Extra[un] = %v, want alice", got.Extra["un"])
+	}
+	if got.Extra["source"] != "dao" {
+		t.Fatalf("Extra[source] = %v, want dao", got.Extra["source"])
+	}
+	if got.Extra["mfaVerified"] != true {
+		t.Fatalf("Extra[mfaVerified] = %v, want true", got.Extra["mfaVerified"])
+	}
+}
+
+// 硬契约：header 只有 alg，不带 typ（与 Nimbus/既有消费方互通）。
+func TestHeaderHasNoTyp(t *testing.T) {
+	kp := newTestKeyPair(t)
+	token, err := Sign(kp, WithSubject("u"))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	hdr := decodeSegment(t, token, 0)
+	if hdr["alg"] != "RS256" {
+		t.Fatalf("header[alg] = %v, want RS256", hdr["alg"])
+	}
+	if _, ok := hdr["typ"]; ok {
+		t.Fatalf("header must not contain typ, got %v", hdr)
+	}
+	if len(hdr) != 1 {
+		t.Fatalf("header keys = %v, want only alg", hdr)
+	}
+}
+
+func TestParseRejectsWrongKey(t *testing.T) {
+	kp := newTestKeyPair(t)
+	other := newTestKeyPair(t)
+	token, err := Sign(kp, WithSubject("u"))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if _, err := Parse(token, other.Public); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse() with wrong key must wrap ErrInvalidToken, got %v", err)
+	}
+}
+
+func TestParseRejectsExpired(t *testing.T) {
+	kp := newTestKeyPair(t)
+	token, err := Sign(kp, WithSubject("u"), WithTTL(-time.Minute))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if _, err := Parse(token, kp.Public); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse() with expired token must wrap ErrInvalidToken, got %v", err)
+	}
+	// 容忍时钟偏移后同一令牌必须通过。
+	if _, err := Parse(token, kp.Public, WithLeeway(2*time.Minute)); err != nil {
+		t.Fatalf("Parse() with leeway = %v, want nil", err)
+	}
+}
+
+// PEM 往返：GenerateKeyPair 的输出必须能被 ParsePrivateKey/ParsePublicKey 读回。
+func TestPEMRoundTrip(t *testing.T) {
+	kp := newTestKeyPair(t)
+	privPEM, pubPEM, err := MarshalKeyPairPEM(kp)
+	if err != nil {
+		t.Fatalf("MarshalKeyPairPEM() error = %v", err)
+	}
+	priv, err := ParsePrivateKey([]byte(privPEM))
+	if err != nil {
+		t.Fatalf("ParsePrivateKey() error = %v", err)
+	}
+	if priv.N.BitLen() != 2048 {
+		t.Fatalf("priv bits = %d, want 2048", priv.N.BitLen())
+	}
+	pub, err := ParsePublicKey([]byte(pubPEM))
+	if err != nil {
+		t.Fatalf("ParsePublicKey() error = %v", err)
+	}
+	if pub.N.Cmp(priv.N) != 0 {
+		t.Fatal("public key does not match private key")
+	}
+	_ = kp
+}
+
+// 兼容形态：既有消费方用「结构体 claims + omitempty」签发的令牌必须能被 Parse 读回
+// （un/source/mfaVerified=false 缺省时不在 payload 里，Parse 不得因此报错）。
+func TestParseStructClaimsShape(t *testing.T) {
+	kp := newTestKeyPair(t)
+	privPEM, _, err := MarshalKeyPairPEM(kp)
+	if err != nil {
+		t.Fatalf("MarshalKeyPairPEM() error = %v", err)
+	}
+	priv, err := ParsePrivateKey([]byte(privPEM))
+	if err != nil {
+		t.Fatalf("ParsePrivateKey() error = %v", err)
+	}
+	tok := gojwtToken(priv, "user-9", "dao")
+	tokenStr, err := tok.SignedString(priv)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+	got, err := Parse(tokenStr, kp.Public)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Subject != "user-9" {
+		t.Fatalf("Subject = %q, want user-9", got.Subject)
+	}
+	if got.Extra["source"] != "dao" {
+		t.Fatalf("Extra[source] = %v, want dao", got.Extra["source"])
+	}
+	if _, ok := got.Extra["un"]; ok {
+		t.Fatalf("Extra must not contain absent claim un, got %v", got.Extra)
+	}
+}
+
+// gojwtToken 用 golang-jwt 原生 RegisteredClaims（struct 形态）构造令牌，
+// 模拟「结构体 claims + omitempty」签发方的产物（如 kuboard-go 既有实现）。
+func gojwtToken(priv *rsa.PrivateKey, sub, source string) *gojwt.Token {
+	claims := struct {
+		gojwt.RegisteredClaims
+		Source string `json:"source,omitempty"`
+	}{
+		RegisteredClaims: gojwt.RegisteredClaims{
+			Issuer:   "self",
+			Subject:  sub,
+			ID:       "jti-x",
+			IssuedAt: gojwt.NewNumericDate(time.Now()),
+		},
+		Source: source,
+	}
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, claims)
+	delete(tok.Header, "typ")
+	return tok
+}
