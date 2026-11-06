@@ -1,6 +1,9 @@
 package uidgen
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRandomHexLengthAndCharset(t *testing.T) {
 	s := RandomHex(16)
@@ -91,4 +94,31 @@ func indexAny(alphabet string, c byte) int {
 		}
 	}
 	return -1
+}
+
+// TestRandomString_AlphabetTooLarge_Panic 钉住 #52：alphabet 字节数 >256 时拒绝采样
+// maxMultiple 归 0 ⇒ 死循环烧 crypto/rand——构造期 panic 当场暴露（对齐 #50 哲学）。
+func TestRandomString_AlphabetTooLarge_Panic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("alphabet >256 bytes must panic")
+		}
+	}()
+	RandomString(strings.Repeat("字", 100), 8) // byte len = 300
+}
+
+// TestRandomString_LargeAsciiAlphabet_Works 大 alphabet（≤256 字节）正常出串。
+// 注：128<len≤256 的多字节 alphabet 按字节采样会产出 UTF-8 断裂字节（#52 的
+// 既有次生问题，本修复只拦死循环）——多字节字符集支持需按 rune 采样重构。
+func TestRandomString_LargeAsciiAlphabet_Works(t *testing.T) {
+	alphabet := strings.Repeat("abcdef0123456789", 16) // 256 字节，恰好在上限内
+	out := RandomString(alphabet, 32)
+	if len(out) != 32 {
+		t.Fatalf("len=%d want 32", len(out))
+	}
+	for _, c := range []byte(out) {
+		if !strings.ContainsRune(alphabet, rune(c)) {
+			t.Fatalf("char %q not in alphabet", c)
+		}
+	}
 }

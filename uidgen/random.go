@@ -5,6 +5,7 @@ package uidgen
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 )
 
@@ -34,6 +35,9 @@ func RandomString(alphabet string, n int) string {
 	}
 	if len(alphabet) == 0 {
 		panic("uidgen: 空 alphabet")
+	}
+	if len(alphabet) > 256 {
+		panic(fmt.Sprintf("uidgen: alphabet 字节数 %d > 256，拒绝采样 maxMultiple 归 0 ⇒ RandomString 死循环（#52）——非法入参当场暴露（对齐 #50 哲学）", len(alphabet)))
 	}
 	if len(alphabet) == 1 {
 		out := make([]byte, n)

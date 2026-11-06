@@ -4,7 +4,7 @@
 //
 //	uidgen.InitSnowflake(7)                  // 一次性初始化, machineID ∈ [0, 1023]
 //	id := uidgen.SnowflakeID()               // int64, 不返错, auto-init 兜底
-//	uidgen.ExtractSnowflakeTime(id)          // epoch = 2026-01-01
+//	uidgen.ExtractSnowflakeTime(id)          // epoch = 2025-01-01
 //	uidgen.ExtractSnowflakeMachineID(id)
 //	uidgen.ExtractSnowflakeSequence(id)
 //
