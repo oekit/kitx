@@ -149,7 +149,7 @@ func (s *Snowflake) next() int64 {
 }
 
 // ExtractSnowflakeTime 从 Snowflake ID 中提取生成时间.
-// 注意：与 ExtractTime 不可混用——epoch 不同（2026 vs 2024）.
+// 注意：与 ExtractTime 不可混用——epoch 不同（2025 vs 2024）.
 func ExtractSnowflakeTime(id int64) time.Time {
 	ts := (id >> timestampShift) + snowflakeEpoch
 	return time.UnixMilli(ts)
