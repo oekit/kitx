@@ -1,3 +1,9 @@
+## [v0.4.1] — 2026-11-06
+
+- fix(uidgen): alphabet 超限死循环防呆 + epoch doc 修正（kitx#52 #53）
+
+关联问题单：kitx#52、kitx#53。
+
 ## [v0.4.0] — 2026-11-06
 
 - feat: 新增 jwt 子包——RS256 JWT 签发与校验：header 只含 {"alg":"RS256"} 不带 typ（与 Nimbus/既有消费方互通）、业务声明 WithClaim 平铺 / Claims.Extra 收集、PEM 密钥对（PKCS#1/PKCS#8 私钥，PKIX/PKCS#1/X.509 证书公钥）。来源：kuboard-go JWT 契约上移（matrix 决策 U2）
