@@ -14,8 +14,8 @@ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63Y
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/leodido/go-urn v1.5.0 h1:pLqT2kq1zpHW/1D18QMjMpdtX7cekxqtJJjg5ANyWw0=
 github.com/leodido/go-urn v1.5.0/go.mod h1:9BORnCDhdPBJNDEX+w1bJisa8yOKYi116VeO96s4ifE=
-github.com/oekit/pkg v0.37.1 h1:Hq8FJnTtKNTyJ5gNFUl9ORQkM3WwzSriOHnUmF9bbyA=
-github.com/oekit/pkg v0.37.1/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
+github.com/oekit/pkg v0.37.3 h1:lj5VuEeQRDP3sTwXZQyCVxwDTbzsGdkRoeGBDFcsKzo=
+github.com/oekit/pkg v0.37.3/go.mod h1:sVeOtmG1sLY2aSnzFIbUAF2Qoh7G8R5vnWtWmLCv8NM=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
