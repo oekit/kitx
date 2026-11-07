@@ -1,3 +1,7 @@
+## [v0.4.3] — 2026-11-08
+
+- build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）
+
 ## [v0.4.2] — 2026-11-07
 
 - feat(jwt): Sign 新增 WithIssuedAt/WithNow——iat 可注入、exp/iat 同钟源（#64）
