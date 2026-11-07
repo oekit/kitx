@@ -389,3 +389,58 @@ func TestParseWithAudience(t *testing.T) {
 		t.Fatalf("Parse() without audience check = %v, want nil", err)
 	}
 }
+
+// #67：类型异常的注册声明 fail-closed——iss/sub/jti 存在但非字符串（如 Java 侧
+// Long 序列化出的数值 sub、数组 iss）时 Parse 拒绝并带声明名与实际类型，不再
+// 静默归零成空 Subject 放行（RFC 7519 §4.1.1/§4.1.2 要求 iss/sub MUST be a String）。
+func TestParseRejectsClaimTypeAnomaly(t *testing.T) {
+	kp := newTestKeyPair(t)
+	// WithClaim 平铺覆盖同名注册声明，构造「存在但类型异常」的违规令牌。
+	numSub, err := Sign(kp, WithSubject("u"), WithClaim("sub", 12345))
+	if err != nil {
+		t.Fatalf("Sign() numSub error = %v", err)
+	}
+	arrIss, err := Sign(kp, WithIssuer("self"), WithClaim("iss", []any{"a", "b"}))
+	if err != nil {
+		t.Fatalf("Sign() arrIss error = %v", err)
+	}
+	boolJTI, err := Sign(kp, WithJTI("j"), WithClaim("jti", true))
+	if err != nil {
+		t.Fatalf("Sign() boolJTI error = %v", err)
+	}
+	cases := []struct {
+		name  string
+		token string
+		want  string // 期望错误文案片段：声明名 + 实际类型
+	}{
+		{"numeric sub", numSub, "声明 sub 类型异常: float64"},
+		{"array iss", arrIss, "声明 iss 类型异常: []interface {}"},
+		{"boolean jti", boolJTI, "声明 jti 类型异常: bool"},
+	}
+	for _, tc := range cases {
+		_, err := Parse(tc.token, kp.Public)
+		if !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("[%s] Parse() must wrap ErrInvalidToken, got %v", tc.name, err)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("[%s] error = %v, want contains %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// #67：只有「存在但类型异常」才 fail-closed——缺失 iss/sub/jti 的令牌维持零值
+// 不报错，缺 sub 的令牌按消费方自身的校验责任走。
+func TestParseMissingClaimsStayZero(t *testing.T) {
+	kp := newTestKeyPair(t)
+	token, err := Sign(kp, WithTTL(time.Hour)) // 不带 iss/sub/jti
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	got, err := Parse(token, kp.Public)
+	if err != nil {
+		t.Fatalf("Parse() error = %v, want nil（缺失声明不报错）", err)
+	}
+	if got.Issuer != "" || got.Subject != "" || got.ID != "" {
+		t.Fatalf("missing claims must stay zero values, got iss=%q sub=%q jti=%q", got.Issuer, got.Subject, got.ID)
+	}
+}
