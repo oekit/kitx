@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/go-playground/validator/v10 v10.30.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/oekit/pkg v0.37.3
+	github.com/oekit/pkg v0.37.4
 )
 
 require (
