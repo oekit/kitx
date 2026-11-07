@@ -31,6 +31,7 @@ type signOptions struct {
 	subject   string
 	jti       string
 	ttl       time.Duration
+	noExpiry  bool
 	notBefore *time.Time
 	claims    map[string]any
 	nowFn     func() time.Time
@@ -48,8 +49,25 @@ func WithSubject(sub string) SignOption { return func(o *signOptions) { o.subjec
 // WithJTI 设置 jti（令牌 ID）。
 func WithJTI(jti string) SignOption { return func(o *signOptions) { o.jti = jti } }
 
-// WithTTL 设置 exp = iat + ttl。零值 = 不写 exp。
-func WithTTL(d time.Duration) SignOption { return func(o *signOptions) { o.ttl = d } }
+// WithTTL 设置 exp = iat + ttl。d 为 0 直接 panic（#65）：显式 0 与「未设置」
+// 不可区分，而最可能的成因是「配置缺失的零值透传」——静默接受等于放行一批
+// 永不过期的凭据，与 uidgen.RandomHex 拒绝空串密钥（#50）同款纪律。确需无
+// 过期令牌请显式 WithNoExpiry。负值不拦（既有消费方用负 ttl 构造已过期令牌
+// 做校验测试）。
+func WithTTL(d time.Duration) SignOption {
+	return func(o *signOptions) {
+		if d == 0 {
+			panic("jwt: WithTTL(0)——永不过期令牌是最危险的缺省（多为配置零值透传），确需无过期令牌请显式 WithNoExpiry()（#65）")
+		}
+		o.ttl = d
+		o.noExpiry = false // last-wins：WithNoExpiry 之后再 WithTTL 恢复写 exp
+	}
+}
+
+// WithNoExpiry 显式签发无 exp 的令牌（#65）：名字本身即审计信号，grep 得到。
+// 无 exp 令牌一旦泄漏没有自然失效路径，仅供确有轮换/吊销机制的场景；与
+// WithTTL 并用时后应用的生效。
+func WithNoExpiry() SignOption { return func(o *signOptions) { o.noExpiry = true } }
 
 // WithNotBefore 设置 nbf。
 func WithNotBefore(t time.Time) SignOption { return func(o *signOptions) { o.notBefore = &t } }
@@ -80,7 +98,7 @@ func WithClaim(key string, val any) SignOption {
 }
 
 // Sign 用 RS256 签发令牌。缺省 iat = time.Now()、ttl = 24h；可用 WithNow/
-// WithIssuedAt 注入签发时刻（iat 与 exp 同钟源）。
+// WithIssuedAt 注入签发时刻（iat 与 exp 同钟源），WithNoExpiry 显式去掉 exp。
 func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	if kp == nil || kp.Private == nil {
 		return "", fmt.Errorf("%w: 缺少私钥", ErrInvalidToken)
@@ -100,7 +118,7 @@ func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	if o.jti != "" {
 		payload["jti"] = o.jti
 	}
-	if o.ttl != 0 {
+	if !o.noExpiry {
 		payload["exp"] = now.Add(o.ttl).Unix()
 	}
 	payload["iat"] = now.Unix()

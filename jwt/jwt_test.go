@@ -300,3 +300,44 @@ func TestSignDefaultClockAndTTL(t *testing.T) {
 		t.Fatalf("exp = %d, want iat+24h = %d", exp, iat+24*3600)
 	}
 }
+
+// #65：WithTTL(0) 直接 panic——显式 0 与「未设置」不可区分，静默产出无 exp 令牌。
+func TestWithTTLZeroPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("WithTTL(0) must panic")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "WithTTL(0)") {
+			t.Fatalf("panic message = %v, want mention of WithTTL(0)", r)
+		}
+	}()
+	kp := newTestKeyPair(t)
+	_, _ = Sign(kp, WithSubject("u"), WithTTL(0))
+}
+
+// #65：无过期令牌必须显式 WithNoExpiry——payload 不含 exp 且可正常解析；与 WithTTL last-wins。
+func TestWithNoExpiry(t *testing.T) {
+	kp := newTestKeyPair(t)
+	token, err := Sign(kp, WithSubject("u"), WithNoExpiry())
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	payload := decodeSegment(t, token, 1)
+	if _, ok := payload["exp"]; ok {
+		t.Fatalf("payload must not contain exp, got %v", payload)
+	}
+	if _, err := Parse(token, kp.Public); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	// last-wins：WithNoExpiry 之后再 WithTTL 恢复写 exp。
+	token2, err := Sign(kp, WithSubject("u"), WithNoExpiry(), WithTTL(time.Hour))
+	if err != nil {
+		t.Fatalf("Sign() token2 error = %v", err)
+	}
+	payload2 := decodeSegment(t, token2, 1)
+	if _, ok := payload2["exp"]; !ok {
+		t.Fatalf("WithTTL after WithNoExpiry must re-enable exp (last-wins), got %v", payload2)
+	}
+}
