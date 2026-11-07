@@ -162,9 +162,15 @@ func formatMessageNamed(fe validator.FieldError, name string) string {
 	case "email":
 		return fmt.Sprintf("%s must be a valid email address", field)
 	case "min":
-		return fmt.Sprintf("%s length must be at least %s", field, fe.Param())
+		if isLengthKind(fe.Kind()) {
+			return fmt.Sprintf("%s length must be at least %s", field, fe.Param())
+		}
+		return fmt.Sprintf("%s must be at least %s", field, fe.Param())
 	case "max":
-		return fmt.Sprintf("%s length must be at most %s", field, fe.Param())
+		if isLengthKind(fe.Kind()) {
+			return fmt.Sprintf("%s length must be at most %s", field, fe.Param())
+		}
+		return fmt.Sprintf("%s must be at most %s", field, fe.Param())
 	case "gte":
 		return fmt.Sprintf("%s must be greater than or equal to %s", field, fe.Param())
 	case "lte":
@@ -191,5 +197,18 @@ func formatMessageNamed(fe validator.FieldError, name string) string {
 		return fmt.Sprintf("%s must contain only letters and numbers", field)
 	default:
 		return fmt.Sprintf("%s validation failed (%s)", field, tag)
+	}
+}
+
+// isLengthKind 判断该 Kind 上 go-playground 的 min/max 语义是长度而非数值
+// 边界（string/slice/map/array；数值 Kind 的 min/max 是值边界，非长度的
+// Kind 一律按值边界措辞）。#73：min/max 分支此前恒写 "length must be"——
+// 对 int/float 字段是错误陈述，用户按消息改「长度」永远过不了校验。
+func isLengthKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Slice, reflect.Map, reflect.Array:
+		return true
+	default:
+		return false
 	}
 }
