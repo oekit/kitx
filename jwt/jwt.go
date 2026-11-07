@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
@@ -92,7 +93,21 @@ func WithIssuedAt(t time.Time) SignOption {
 	return func(o *signOptions) { o.nowFn = func() time.Time { return t } }
 }
 
+// reservedClaims 是 RFC 7519 §4.1 注册声明名。kitx/jwt 为它们提供专属签发
+// 通道（WithIssuer/WithSubject/WithJTI/WithNotBefore；exp/iat 由 WithTTL/
+// WithNoExpiry 与签发时钟派生），业务声明不得占用这些键。
+var reservedClaims = map[string]struct{}{
+	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "nbf": {}, "iat": {}, "jti": {},
+}
+
 // WithClaim 追加一个业务自定义声明。
+//
+// 注册声明（iss/sub/aud/exp/nbf/iat/jti）不可经 WithClaim 注入，注入时 Sign
+// 直接报错（#71）：Sign 先写注册声明、最后平铺 claims，无条件覆盖会让
+// WithClaim("exp", ...) 顶掉过期时间、WithClaim("iss", externalInput) 篡改
+// 签发者——claim key 若来自配置/请求拼接，就是令牌声明注入面。注册声明请用
+// WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与
+// 签发时钟派生。
 func WithClaim(key string, val any) SignOption {
 	return func(o *signOptions) { o.claims[key] = val }
 }
@@ -106,6 +121,11 @@ func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	o := &signOptions{ttl: 24 * time.Hour, claims: map[string]any{}, nowFn: time.Now}
 	for _, opt := range opts {
 		opt(o)
+	}
+	// 注册声明注入面 fail-closed（#71）：claims 平铺在注册声明写入之后、
+	// 无条件覆盖，注入保留键 = 顶掉 exp/iss/iat 等的既定值。
+	if hits := reservedClaimHits(o.claims); len(hits) > 0 {
+		return "", fmt.Errorf("%w: WithClaim 不能注入注册声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生", ErrInvalidToken, hits)
 	}
 	now := o.nowFn()
 	payload := map[string]any{}
@@ -154,6 +174,10 @@ func WithAudience(expected ...string) ParseOption {
 
 // Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。
 //
+// 错误链保留（#70）：失败时外层哨兵 ErrInvalidToken 与 gojwt 底层 sentinel
+// （ErrTokenExpired/ErrTokenSignatureInvalid/ErrTokenNotValidYet 等）同时可
+// errors.Is——业务侧可据此分流「过期→走刷新、签名坏→踢下线」。
+//
 // 已注册声明（iss/sub/aud/jti/exp/iat/nbf）收进 RegisteredClaims；其余进 Extra。
 // iss/sub/jti 存在但非字符串时拒绝（#67）：RFC 7519 §4.1.1/§4.1.2 要求 iss/sub
 // MUST be a String，类型异常即规格违规令牌，fail-closed 而非静默归零放行
@@ -179,7 +203,11 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 		return pub, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		// 双 %w 保留底层错误链（#70）：外层可 Is 到 ErrInvalidToken，同时
+		// gojwt 的 ErrTokenExpired/ErrTokenSignatureInvalid 等 sentinel 也
+		// 可 Is——业务侧「过期→走刷新、签名坏→踢下线」的分流依赖它。%v 会
+		// 把链拍平成纯文本，两类令牌不可区分。
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	mc, ok := tok.Claims.(gojwt.MapClaims)
 	if !ok {
@@ -244,6 +272,18 @@ func mapStr(mc gojwt.MapClaims, key string) (string, error) {
 		return "", fmt.Errorf("声明 %s 类型异常: %T", key, v)
 	}
 	return s, nil
+}
+
+// reservedClaimHits 返回 claims 里命中注册声明名的键（排序，报错文案确定）。
+func reservedClaimHits(claims map[string]any) []string {
+	var hits []string
+	for k := range claims {
+		if _, ok := reservedClaims[k]; ok {
+			hits = append(hits, k)
+		}
+	}
+	sort.Strings(hits)
+	return hits
 }
 
 // mapTime 取数字时间声明（缺失或类型异常返回 nil）。

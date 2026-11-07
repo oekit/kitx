@@ -128,6 +128,39 @@ func TestParseRejectsExpired(t *testing.T) {
 	}
 }
 
+// #70：Parse 保留底层错误链——过期令牌与伪造令牌靠 gojwt 的 sentinel 可区分，
+// 业务侧「过期→走刷新、签名坏→踢下线」的分流才能落地。
+//
+// 缺陷成因：外层用 fmt.Errorf("%w: %v") 把 gojwt 的 ErrTokenExpired/
+// ErrTokenSignatureInvalid 拍平成纯文本，errors.Is 对底层 sentinel 全部失效。
+func TestParseErrorChainPreserved(t *testing.T) {
+	kp := newTestKeyPair(t)
+	expired, err := Sign(kp, WithSubject("u"), WithTTL(-time.Minute))
+	if err != nil {
+		t.Fatalf("Sign() expired error = %v", err)
+	}
+	_, err = Parse(expired, kp.Public)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("外层哨兵仍可判：errors.Is(ErrInvalidToken) = false, err = %v", err)
+	}
+	if !errors.Is(err, gojwt.ErrTokenExpired) {
+		t.Fatalf("过期令牌必须能 Is 到 gojwt.ErrTokenExpired, err = %v", err)
+	}
+
+	other := newTestKeyPair(t)
+	forged, err := Sign(kp, WithSubject("u"))
+	if err != nil {
+		t.Fatalf("Sign() forged error = %v", err)
+	}
+	_, err = Parse(forged, other.Public)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("外层哨兵仍可判：errors.Is(ErrInvalidToken) = false, err = %v", err)
+	}
+	if !errors.Is(err, gojwt.ErrTokenSignatureInvalid) {
+		t.Fatalf("错密钥令牌必须能 Is 到 gojwt.ErrTokenSignatureInvalid, err = %v", err)
+	}
+}
+
 // PEM 往返：GenerateKeyPair 的输出必须能被 ParsePrivateKey/ParsePublicKey 读回。
 func TestPEMRoundTrip(t *testing.T) {
 	kp := newTestKeyPair(t)
@@ -202,6 +235,20 @@ func gojwtToken(priv *rsa.PrivateKey, sub, source string) *gojwt.Token {
 	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, claims)
 	delete(tok.Header, "typ")
 	return tok
+}
+
+// rawClaimsToken 用 gojwt.MapClaims 直接构造令牌（#71 后 WithClaim 不能注入
+// 注册声明，测试需要构造带 aud / 类型异常注册声明的令牌时改走这条路，
+// 模拟「第三方/异常形态签发方」的产物）。header 保持硬契约形态（只含 alg）。
+func rawClaimsToken(t *testing.T, kp *KeyPair, claims gojwt.MapClaims) string {
+	t.Helper()
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, claims)
+	tok.Header = map[string]any{"alg": "RS256"}
+	s, err := tok.SignedString(kp.Private)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+	return s
 }
 
 // #64：WithIssuedAt 显式 iat——iat 取注入时刻、exp = iat + ttl 同源，两次签发完全确定。
@@ -345,14 +392,10 @@ func TestWithNoExpiry(t *testing.T) {
 // #66：WithAudience 受众校验——命中任一通过；令牌无 aud 且配置了期望受众 ⇒ fail-closed 拒绝。
 func TestParseWithAudience(t *testing.T) {
 	kp := newTestKeyPair(t)
-	single, err := Sign(kp, WithSubject("u"), WithClaim("aud", "svc-a"))
-	if err != nil {
-		t.Fatalf("Sign() single error = %v", err)
-	}
-	multi, err := Sign(kp, WithSubject("u"), WithClaim("aud", []any{"svc-a", "svc-b"}))
-	if err != nil {
-		t.Fatalf("Sign() multi error = %v", err)
-	}
+	// aud 是注册声明，#71 后不可经 WithClaim 注入，用 rawClaimsToken 构造
+	// 带 aud 的令牌（模拟第三方签发方产物）。
+	single := rawClaimsToken(t, kp, gojwt.MapClaims{"aud": "svc-a"})
+	multi := rawClaimsToken(t, kp, gojwt.MapClaims{"aud": []any{"svc-a", "svc-b"}})
 	none, err := Sign(kp, WithSubject("u"))
 	if err != nil {
 		t.Fatalf("Sign() none error = %v", err)
@@ -395,19 +438,11 @@ func TestParseWithAudience(t *testing.T) {
 // 静默归零成空 Subject 放行（RFC 7519 §4.1.1/§4.1.2 要求 iss/sub MUST be a String）。
 func TestParseRejectsClaimTypeAnomaly(t *testing.T) {
 	kp := newTestKeyPair(t)
-	// WithClaim 平铺覆盖同名注册声明，构造「存在但类型异常」的违规令牌。
-	numSub, err := Sign(kp, WithSubject("u"), WithClaim("sub", 12345))
-	if err != nil {
-		t.Fatalf("Sign() numSub error = %v", err)
-	}
-	arrIss, err := Sign(kp, WithIssuer("self"), WithClaim("iss", []any{"a", "b"}))
-	if err != nil {
-		t.Fatalf("Sign() arrIss error = %v", err)
-	}
-	boolJTI, err := Sign(kp, WithJTI("j"), WithClaim("jti", true))
-	if err != nil {
-		t.Fatalf("Sign() boolJTI error = %v", err)
-	}
+	// 注册声明不可经 WithClaim 注入（#71），用 rawClaimsToken 构造
+	// 「存在但类型异常」的违规令牌（模拟第三方/Java 侧 Long 序列化产物）。
+	numSub := rawClaimsToken(t, kp, gojwt.MapClaims{"sub": 12345})
+	arrIss := rawClaimsToken(t, kp, gojwt.MapClaims{"iss": []any{"a", "b"}})
+	boolJTI := rawClaimsToken(t, kp, gojwt.MapClaims{"jti": true})
 	cases := []struct {
 		name  string
 		token string
@@ -442,5 +477,33 @@ func TestParseMissingClaimsStayZero(t *testing.T) {
 	}
 	if got.Issuer != "" || got.Subject != "" || got.ID != "" {
 		t.Fatalf("missing claims must stay zero values, got iss=%q sub=%q jti=%q", got.Issuer, got.Subject, got.ID)
+	}
+}
+
+// #71：WithClaim 注入注册声明必须被 Sign 拒绝——Sign 先写注册声明、最后平铺
+// claims 且无条件覆盖，WithClaim("exp", ...) 顶掉过期时间、WithClaim("iss",
+// externalInput) 篡改签发者；claim key 来自配置/请求拼接时即令牌声明注入面。
+func TestSignRejectsReservedClaimInjection(t *testing.T) {
+	kp := newTestKeyPair(t)
+	for _, key := range []string{"iss", "sub", "aud", "exp", "iat", "nbf", "jti"} {
+		token, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithClaim(key, "injected"))
+		if err == nil {
+			t.Fatalf("Sign() with WithClaim(%q) must be rejected, got token %s", key, token)
+		}
+		if !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("Sign() with WithClaim(%q) must wrap ErrInvalidToken, got %v", key, err)
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Fatalf("error %v must name the reserved claim %q", err, key)
+		}
+	}
+	// 业务自定义声明不受影响，照常平铺进 payload。
+	token, err := Sign(kp, WithSubject("u"), WithClaim("un", "alice"), WithClaim("source", "dao"))
+	if err != nil {
+		t.Fatalf("Sign() with custom claims = %v, want nil", err)
+	}
+	payload := decodeSegment(t, token, 1)
+	if payload["un"] != "alice" || payload["source"] != "dao" {
+		t.Fatalf("custom claims must be flattened into payload, got %v", payload)
 	}
 }
