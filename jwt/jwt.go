@@ -155,6 +155,10 @@ func WithAudience(expected ...string) ParseOption {
 // Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。
 //
 // 已注册声明（iss/sub/aud/jti/exp/iat/nbf）收进 RegisteredClaims；其余进 Extra。
+// iss/sub/jti 存在但非字符串时拒绝（#67）：RFC 7519 §4.1.1/§4.1.2 要求 iss/sub
+// MUST be a String，类型异常即规格违规令牌，fail-closed 而非静默归零放行
+// （golang-jwt 上游 MapClaims.GetSubject 对类型异常同样返回错误）；声明缺失
+// 维持零值不报错——缺失声明的令牌按消费方自身的校验责任走。
 func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, error) {
 	if pub == nil {
 		return nil, fmt.Errorf("%w: 缺少公钥", ErrInvalidToken)
@@ -181,11 +185,23 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 	if !ok {
 		return nil, fmt.Errorf("%w: 载荷类型异常", ErrInvalidToken)
 	}
+	iss, err := mapStr(mc, "iss")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	sub, err := mapStr(mc, "sub")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	jti, err := mapStr(mc, "jti")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
 	out := &Claims{Extra: map[string]any{}}
 	out.RegisteredClaims = gojwt.RegisteredClaims{
-		Issuer:    mapStr(mc, "iss"),
-		Subject:   mapStr(mc, "sub"),
-		ID:        mapStr(mc, "jti"),
+		Issuer:    iss,
+		Subject:   sub,
+		ID:        jti,
 		ExpiresAt: mapTime(mc, "exp"),
 		IssuedAt:  mapTime(mc, "iat"),
 		NotBefore: mapTime(mc, "nbf"),
@@ -214,14 +230,20 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 	return out, nil
 }
 
-// mapStr 取 string 声明（缺失或类型异常返回空串）。
-func mapStr(mc gojwt.MapClaims, key string) string {
+// mapStr 取 string 声明（#67）：缺失返回 ("", nil)——缺失按消费方自身的校验
+// 责任走，不报错；存在但非字符串返回错误（带声明名与实际类型，如
+// 「声明 sub 类型异常: float64」）——数值 sub（部分第三方 provider 与 Java 侧
+// Long 序列化产物）静默归零成空 Subject 放行，比拒绝更危险。
+func mapStr(mc gojwt.MapClaims, key string) (string, error) {
 	v, ok := mc[key]
 	if !ok {
-		return ""
+		return "", nil
 	}
-	s, _ := v.(string)
-	return s
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("声明 %s 类型异常: %T", key, v)
+	}
+	return s, nil
 }
 
 // mapTime 取数字时间声明（缺失或类型异常返回 nil）。
