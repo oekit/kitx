@@ -105,3 +105,41 @@ func TestValidate_KeepsRealFieldName(t *testing.T) {
 		t.Fatalf("消息 %q 不含字段名", fe.Message)
 	}
 }
+
+// TestValidateVar_MinMaxMessageByKind 回归测试（#73）：min/max 的措辞必须按
+// 字段类型区分——数值字段是值边界（"must be at least/most"），字符串/切片等
+// 才是长度（"length must be at least/most"）。
+//
+// 缺陷成因：formatMessageNamed 的 min/max 分支硬编码 "length must be
+// at least/most"——go-playground 对 int/float 的 min/max 是值边界，数值字段
+// 的消息变成了错误陈述，用户按消息改「长度」永远过不了校验。
+func TestValidateVar_MinMaxMessageByKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   any
+		field   string
+		tag     string
+		wantMsg string
+	}{
+		// 数值边界：消息不得出现 "length"。
+		{"numeric min", 18, "age", "min=21", "age must be at least 21"},
+		{"numeric max", 200, "age", "max=150", "age must be at most 150"},
+		// 字符串长度：措辞保持不变（护栏）。
+		{"string min", "ab", "name", "min=3", "name length must be at least 3"},
+		{"string max", "toolong", "name", "max=5", "name length must be at most 5"},
+	}
+	for _, tc := range cases {
+		err := ValidateVarNamed(tc.value, tc.field, tc.tag)
+		if err == nil {
+			t.Fatalf("[%s] 期望校验失败", tc.name)
+		}
+		var ve *ValidationError
+		if !errors.As(err, &ve) {
+			t.Fatalf("[%s] 期望 *ValidationError，实得 %T", tc.name, err)
+		}
+		fe := ve.Errors()[0]
+		if fe.Message != tc.wantMsg {
+			t.Errorf("[%s] 消息 = %q, 期望 %q", tc.name, fe.Message, tc.wantMsg)
+		}
+	}
+}

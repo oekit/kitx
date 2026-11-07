@@ -16,13 +16,15 @@ func TestSnowflakeMachineID_NotInitialized(t *testing.T) {
 	}
 }
 
-// TestSnowflake_Next_ClockBackward covers the busy-wait branch in
-// snowflake.next() when time.Now() is behind lastTS.
+// TestSnowflake_Next_ClockBackward covers the bounded-wait branch in
+// snowflake.next() when time.Now() is behind lastTS within tolerance (#72:
+// 显式给容忍上限——零值容忍下 5ms 回拨会直接转进位生成，盖不到这个分支).
 func TestSnowflake_Next_ClockBackward(t *testing.T) {
 	s := &Snowflake{
-		epoch:     snowflakeEpoch,
-		machineID: 1,
-		lastTS:    time.Now().UnixMilli() + 5, // 5ms in the future
+		epoch:              snowflakeEpoch,
+		machineID:          1,
+		clockBackTolerance: 5 * time.Second,
+		lastTS:             time.Now().UnixMilli() + 5, // 5ms in the future
 	}
 
 	start := time.Now()
