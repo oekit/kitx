@@ -33,6 +33,7 @@ type signOptions struct {
 	ttl       time.Duration
 	notBefore *time.Time
 	claims    map[string]any
+	nowFn     func() time.Time
 }
 
 // SignOption 是 Sign 的函数选项。
@@ -53,21 +54,42 @@ func WithTTL(d time.Duration) SignOption { return func(o *signOptions) { o.ttl =
 // WithNotBefore 设置 nbf。
 func WithNotBefore(t time.Time) SignOption { return func(o *signOptions) { o.notBefore = &t } }
 
+// WithNow 注入签发时钟：iat = now()、exp = iat + ttl 同钟源（nbf 仍取
+// WithNotBefore 的绝对时刻）。缺省 time.Now（#64：缺省行为不变）；f 为 nil
+// 直接 panic——静默回落真实时钟会让 iat 无声漂移。测试可注入假时钟获得
+// 确定性令牌，不再只能断言 iat≈now 的区间。
+func WithNow(f func() time.Time) SignOption {
+	return func(o *signOptions) {
+		if f == nil {
+			panic("jwt: WithNow 的时钟函数不能为 nil——静默回落 time.Now() 会让 iat 无声漂移（#64）")
+		}
+		o.nowFn = f
+	}
+}
+
+// WithIssuedAt 显式设置签发时刻：iat = t、exp = t + ttl，等价于 WithNow(
+// 固定返回 t)。带显式签发时刻的签发面（如消费方 Issue(..., now time.Time)
+// 参数形态）委托本包时用它透传 now，缺省行为不变（#64）。
+func WithIssuedAt(t time.Time) SignOption {
+	return func(o *signOptions) { o.nowFn = func() time.Time { return t } }
+}
+
 // WithClaim 追加一个业务自定义声明。
 func WithClaim(key string, val any) SignOption {
 	return func(o *signOptions) { o.claims[key] = val }
 }
 
-// Sign 用 RS256 签发令牌。iat 恒为当前时刻；ttl 缺省 24h。
+// Sign 用 RS256 签发令牌。缺省 iat = time.Now()、ttl = 24h；可用 WithNow/
+// WithIssuedAt 注入签发时刻（iat 与 exp 同钟源）。
 func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	if kp == nil || kp.Private == nil {
 		return "", fmt.Errorf("%w: 缺少私钥", ErrInvalidToken)
 	}
-	o := &signOptions{ttl: 24 * time.Hour, claims: map[string]any{}}
+	o := &signOptions{ttl: 24 * time.Hour, claims: map[string]any{}, nowFn: time.Now}
 	for _, opt := range opts {
 		opt(o)
 	}
-	now := time.Now()
+	now := o.nowFn()
 	payload := map[string]any{}
 	if o.issuer != "" {
 		payload["iss"] = o.issuer

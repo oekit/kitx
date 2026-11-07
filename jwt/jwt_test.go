@@ -203,3 +203,100 @@ func gojwtToken(priv *rsa.PrivateKey, sub, source string) *gojwt.Token {
 	delete(tok.Header, "typ")
 	return tok
 }
+
+// #64：WithIssuedAt 显式 iat——iat 取注入时刻、exp = iat + ttl 同源，两次签发完全确定。
+func TestSignWithIssuedAt(t *testing.T) {
+	kp := newTestKeyPair(t)
+	// 取未来时刻（2100-01-01 UTC），保证 exp 仍在有效期、可走 Parse 往返。
+	fixed := time.Unix(4102444800, 0).UTC()
+	token, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithIssuedAt(fixed))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	payload := decodeSegment(t, token, 1)
+	if got := payload["iat"]; got != float64(fixed.Unix()) {
+		t.Fatalf("payload[iat] = %v, want %d", got, fixed.Unix())
+	}
+	if got := payload["exp"]; got != float64(fixed.Add(time.Hour).Unix()) {
+		t.Fatalf("payload[exp] = %v, want %d", got, fixed.Add(time.Hour).Unix())
+	}
+	// 确定性：同参两次签发 iat 完全一致（缺省时钟只能断言 iat≈now 区间）。
+	again, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithIssuedAt(fixed))
+	if err != nil {
+		t.Fatalf("Sign() again error = %v", err)
+	}
+	if got := decodeSegment(t, again, 1)["iat"]; got != float64(fixed.Unix()) {
+		t.Fatalf("second payload[iat] = %v, want %d（注入时钟下必须确定）", got, fixed.Unix())
+	}
+	// 解析侧读回同一签发时刻。
+	got, err := Parse(token, kp.Public)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.IssuedAt == nil || got.IssuedAt.Unix() != fixed.Unix() {
+		t.Fatalf("IssuedAt = %v, want %d", got.IssuedAt, fixed.Unix())
+	}
+}
+
+// #64：WithNow 注入假时钟——连续签发走同一钟源逐次推进，exp 与 iat 同源。
+func TestSignWithNow(t *testing.T) {
+	kp := newTestKeyPair(t)
+	base := time.Now().Add(time.Hour).Truncate(time.Second) // 未来基准，保证 exp 未过期
+	seq := 0
+	clock := func() time.Time {
+		seq++
+		return base.Add(time.Duration(seq) * time.Second)
+	}
+	first, err := Sign(kp, WithSubject("u"), WithTTL(time.Minute), WithNow(clock))
+	if err != nil {
+		t.Fatalf("Sign() first error = %v", err)
+	}
+	second, err := Sign(kp, WithSubject("u"), WithTTL(time.Minute), WithNow(clock))
+	if err != nil {
+		t.Fatalf("Sign() second error = %v", err)
+	}
+	p1, p2 := decodeSegment(t, first, 1), decodeSegment(t, second, 1)
+	if p1["iat"] != float64(base.Add(time.Second).Unix()) {
+		t.Fatalf("first iat = %v, want %d", p1["iat"], base.Add(time.Second).Unix())
+	}
+	if p2["iat"] != float64(base.Add(2*time.Second).Unix()) {
+		t.Fatalf("second iat = %v, want %d", p2["iat"], base.Add(2*time.Second).Unix())
+	}
+	if p1["exp"] != float64(base.Add(time.Second).Add(time.Minute).Unix()) {
+		t.Fatalf("first exp = %v, want iat+ttl", p1["exp"])
+	}
+	if _, err := Parse(first, kp.Public); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+}
+
+// #64：WithNow(nil) 必须当场 panic——静默回落真实时钟会让 iat 无声漂移。
+func TestWithNowNilPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("WithNow(nil) must panic")
+		}
+	}()
+	kp := newTestKeyPair(t)
+	_, _ = Sign(kp, WithNow(nil))
+}
+
+// #64：缺省行为不变——无时钟选项时 iat 取真实当前时刻（区间断言），且缺省 ttl 仍为 24h。
+func TestSignDefaultClockAndTTL(t *testing.T) {
+	kp := newTestKeyPair(t)
+	before := time.Now().Unix()
+	token, err := Sign(kp, WithSubject("u"))
+	after := time.Now().Unix()
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	payload := decodeSegment(t, token, 1)
+	iat := int64(payload["iat"].(float64))
+	if iat < before || iat > after {
+		t.Fatalf("iat = %d, want within [%d, %d]", iat, before, after)
+	}
+	if exp := int64(payload["exp"].(float64)); exp != iat+24*3600 {
+		t.Fatalf("exp = %d, want iat+24h = %d", exp, iat+24*3600)
+	}
+}
