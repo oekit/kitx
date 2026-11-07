@@ -341,3 +341,51 @@ func TestWithNoExpiry(t *testing.T) {
 		t.Fatalf("WithTTL after WithNoExpiry must re-enable exp (last-wins), got %v", payload2)
 	}
 }
+
+// #66：WithAudience 受众校验——命中任一通过；令牌无 aud 且配置了期望受众 ⇒ fail-closed 拒绝。
+func TestParseWithAudience(t *testing.T) {
+	kp := newTestKeyPair(t)
+	single, err := Sign(kp, WithSubject("u"), WithClaim("aud", "svc-a"))
+	if err != nil {
+		t.Fatalf("Sign() single error = %v", err)
+	}
+	multi, err := Sign(kp, WithSubject("u"), WithClaim("aud", []any{"svc-a", "svc-b"}))
+	if err != nil {
+		t.Fatalf("Sign() multi error = %v", err)
+	}
+	none, err := Sign(kp, WithSubject("u"))
+	if err != nil {
+		t.Fatalf("Sign() none error = %v", err)
+	}
+
+	// 命中任一即通过（string / 数组两种 aud 形态）。
+	if _, err := Parse(single, kp.Public, WithAudience("svc-a")); err != nil {
+		t.Fatalf("Parse() matching audience = %v, want nil", err)
+	}
+	if _, err := Parse(single, kp.Public, WithAudience("svc-b", "svc-a")); err != nil {
+		t.Fatalf("Parse() any-of audience = %v, want nil", err)
+	}
+	if _, err := Parse(multi, kp.Public, WithAudience("svc-b")); err != nil {
+		t.Fatalf("Parse() array audience = %v, want nil", err)
+	}
+	// aud 仍收进 Claims.Audience。
+	got, err := Parse(single, kp.Public, WithAudience("svc-a"))
+	if err != nil {
+		t.Fatalf("Parse() collect error = %v", err)
+	}
+	if len(got.Audience) != 1 || got.Audience[0] != "svc-a" {
+		t.Fatalf("Audience = %v, want [svc-a]", got.Audience)
+	}
+	// 不匹配 ⇒ 拒绝，错误并入 ErrInvalidToken 包装链。
+	if _, err := Parse(single, kp.Public, WithAudience("svc-b")); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse() mismatched audience must wrap ErrInvalidToken, got %v", err)
+	}
+	// fail-closed：令牌无 aud 且配置了期望受众 ⇒ 拒绝。
+	if _, err := Parse(none, kp.Public, WithAudience("svc-a")); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse() absent aud with expected audience must wrap ErrInvalidToken, got %v", err)
+	}
+	// 向后兼容：不配置 WithAudience 时不校验 aud，无 aud 令牌照常通过。
+	if _, err := Parse(none, kp.Public); err != nil {
+		t.Fatalf("Parse() without audience check = %v, want nil", err)
+	}
+}

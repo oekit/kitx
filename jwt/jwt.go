@@ -135,7 +135,8 @@ func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 
 // parseOptions 是解析选项的内部表示。
 type parseOptions struct {
-	leeway time.Duration
+	leeway   time.Duration
+	audience []string
 }
 
 // ParseOption 是 Parse 的函数选项。
@@ -144,9 +145,16 @@ type ParseOption func(*parseOptions)
 // WithLeeway 设置时钟偏移容忍。
 func WithLeeway(d time.Duration) ParseOption { return func(o *parseOptions) { o.leeway = d } }
 
-// Parse 校验并解析令牌（RS256-only，缺省零 leeway）。
+// WithAudience 设置期望受众（#66）：令牌 aud 命中任一即通过；令牌无 aud 时
+// 拒绝（fail-closed）。不设置时不校验 aud（向后兼容）——签名校验只证明
+// 「是我的 key 签的」，不证明「是签给我的」；同密钥多受众场景必须显式配置。
+func WithAudience(expected ...string) ParseOption {
+	return func(o *parseOptions) { o.audience = expected }
+}
+
+// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。
 //
-// 已注册声明（iss/sub/jti/exp/iat/nbf）收进 RegisteredClaims；其余（含 aud）进 Extra。
+// 已注册声明（iss/sub/aud/jti/exp/iat/nbf）收进 RegisteredClaims；其余进 Extra。
 func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, error) {
 	if pub == nil {
 		return nil, fmt.Errorf("%w: 缺少公钥", ErrInvalidToken)
@@ -155,7 +163,14 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 	for _, opt := range opts {
 		opt(o)
 	}
-	parser := gojwt.NewParser(gojwt.WithValidMethods([]string{"RS256"}), gojwt.WithLeeway(o.leeway))
+	parserOpts := []gojwt.ParserOption{
+		gojwt.WithValidMethods([]string{"RS256"}),
+		gojwt.WithLeeway(o.leeway),
+	}
+	if len(o.audience) > 0 {
+		parserOpts = append(parserOpts, gojwt.WithAudience(o.audience...))
+	}
+	parser := gojwt.NewParser(parserOpts...)
 	tok, err := parser.Parse(token, func(t *gojwt.Token) (any, error) {
 		return pub, nil
 	})
