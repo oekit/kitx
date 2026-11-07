@@ -248,3 +248,186 @@ func TestSnowflakeID_SequenceIncrement(t *testing.T) {
 		}
 	}
 }
+
+// TestSnowflake_Next_ClockBackwardBeyondTolerance 回归测试（#72）：大幅回拨
+// （超过容忍上限）不得无限持锁忙等——必须立即转进位生成：next() 马上返回，
+// ID 时间戳取回拨前基准（合成时刻），OnClockBack 回调以真实回拨幅度触发
+// 一次且同一轮回拨内不重复触发。
+//
+// 缺陷成因：回拨分支 `time.Sleep(1ms); continue` 在持有 s.mu 的情况下等时钟
+// 追平——NTP 回拨 1 小时则所有 SnowflakeID() 调用阻塞 1 小时（单 mutex 全局
+// 串行），进程级可用性陷阱。
+func TestSnowflake_Next_ClockBackwardBeyondTolerance(t *testing.T) {
+	backCh := make(chan time.Duration, 1)
+	s := &Snowflake{
+		epoch:              snowflakeEpoch,
+		machineID:          3,
+		clockBackTolerance: 5 * time.Second,
+		onClockBack:        func(back time.Duration) { backCh <- back },
+		lastTS:             time.Now().UnixMilli() + int64((10 * time.Minute).Milliseconds()), // 回拨 10 分钟 > 5s
+	}
+	base := s.lastTS
+
+	start := time.Now()
+	id := s.next()
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("超容忍回拨下 next() 阻塞了 %v——必须立即转进位生成", elapsed)
+	}
+	// 进位生成：时间戳 = 回拨前基准，sequence 从 1 起继续。
+	if ts := ExtractSnowflakeTime(id).UnixMilli(); ts != base {
+		t.Fatalf("进位生成的时间戳 = %d, want 回拨前基准 %d", ts, base)
+	}
+	if got := ExtractSnowflakeSequence(id); got != 1 {
+		t.Fatalf("sequence = %d, want 1", got)
+	}
+	// 回调以真实回拨幅度触发一次。
+	select {
+	case back := <-backCh:
+		if back < 9*time.Minute {
+			t.Fatalf("回调回拨幅度 = %v, want ≈10m", back)
+		}
+	default:
+		t.Fatal("大幅回拨未触发 OnClockBack 回调")
+	}
+	// 同一轮回拨内继续发号：ID 递增唯一，不再重复触发回调。
+	id2 := s.next()
+	if id2 <= id {
+		t.Fatalf("进位生成的 ID 必须递增: %d 后是 %d", id, id2)
+	}
+	select {
+	case back := <-backCh:
+		t.Fatalf("同一轮回拨不应重复触发回调, got %v", back)
+	default:
+	}
+}
+
+// TestSnowflake_Next_ClockBackwardWithinTolerance 回归测试（#72）：容忍上限内
+// 的小幅回拨维持既有行为——持锁有界等待时钟追平后按真实时刻发号（时间戳
+// 不早于回拨前基准），不会误入进位生成。
+func TestSnowflake_Next_ClockBackwardWithinTolerance(t *testing.T) {
+	s := &Snowflake{
+		epoch:              snowflakeEpoch,
+		machineID:          1,
+		clockBackTolerance: 5 * time.Second,
+		lastTS:             time.Now().UnixMilli() + 3, // 回拨 3ms < 5s
+	}
+	base := s.lastTS
+
+	start := time.Now()
+	id := s.next()
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("小幅回拨的等待失控: %v（应 ≈3ms 有界）", elapsed)
+	}
+	if ts := ExtractSnowflakeTime(id).UnixMilli(); ts < base {
+		t.Fatalf("追平后发号的时间戳 %d 早于回拨前基准 %d", ts, base)
+	}
+	if s.synthetic {
+		t.Fatal("容忍度内的小幅回拨不应进入进位生成模式")
+	}
+}
+
+// TestSnowflake_Next_SyntheticSequenceOverflow 回归测试（#72）：进位生成模式
+// 下 sequence 用尽（4096/ms）时合成推进 1ms——不能回头等真实时钟（那是无限
+// 等待）；整段发号 ID 唯一且单调递增。
+func TestSnowflake_Next_SyntheticSequenceOverflow(t *testing.T) {
+	s := &Snowflake{
+		epoch:              snowflakeEpoch,
+		machineID:          2,
+		clockBackTolerance: 5 * time.Second,
+		onClockBack:        func(time.Duration) {},          // 静音缺省 slog.Warn
+		lastTS:             time.Now().UnixMilli() + 60_000, // 真实时钟落后 60s
+	}
+	base := s.lastTS
+
+	const n = 4096 + 16
+	seen := make(map[int64]struct{}, n)
+	var prev int64
+	for i := 0; i < n; i++ {
+		id := s.next()
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate ID %d at i=%d", id, i)
+		}
+		seen[id] = struct{}{}
+		if i > 0 && id <= prev {
+			t.Fatalf("ID 不再递增: %d 在 %d 之后", id, prev)
+		}
+		prev = id
+	}
+	// 4096 个号用尽后合成推进：时间戳越过回拨前基准的下一 ms。
+	if ts := ExtractSnowflakeTime(prev).UnixMilli(); ts <= base {
+		t.Fatalf("sequence 用尽后应合成推进到下一 ms: ts=%d base=%d", ts, base)
+	}
+}
+
+// TestSnowflake_Next_SyntheticRecovers 回归测试（#72）：真实时钟追平后自动
+// 退出进位生成模式，恢复按真实时刻发号（新轮回拨才会再次触发回调）。
+func TestSnowflake_Next_SyntheticRecovers(t *testing.T) {
+	notified := 0
+	s := &Snowflake{
+		epoch:              snowflakeEpoch,
+		machineID:          1,
+		clockBackTolerance: 0, // 任何回拨都进位生成
+		onClockBack:        func(time.Duration) { notified++ },
+		lastTS:             time.Now().UnixMilli() + 2, // 回拨 2ms
+	}
+	id := s.next()
+	if !s.synthetic {
+		t.Fatal("零容忍下回拨必须进入进位生成模式")
+	}
+	base := ExtractSnowflakeTime(id).UnixMilli()
+	// 等真实时钟越过 lastTS（等待量 = 回拨量 2ms，有 deadline 兜底）。
+	deadline := time.Now().Add(time.Second)
+	for time.Now().UnixMilli() <= s.lastTS && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	id2 := s.next()
+	if s.synthetic {
+		t.Fatal("真实时钟追平后必须退出进位生成模式")
+	}
+	if ts := ExtractSnowflakeTime(id2).UnixMilli(); ts <= base {
+		t.Fatalf("追平后的 ID 时间戳 %d 必须越过合成基准 %d", ts, base)
+	}
+	if notified != 1 {
+		t.Fatalf("一轮进位生成只应通报一次, got %d", notified)
+	}
+}
+
+// TestInitSnowflakeWith_Options 回归测试（#72）：InitSnowflakeWith 装配选项进
+// 全局单例；InitSnowflake 缺省容忍上限 5s（向后兼容）。
+func TestInitSnowflakeWith_Options(t *testing.T) {
+	resetForTest()
+	defer resetForTest()
+
+	var gotBack time.Duration
+	if err := InitSnowflakeWith(9,
+		WithClockBackTolerance(time.Second),
+		WithOnClockBack(func(back time.Duration) { gotBack = back }),
+	); err != nil {
+		t.Fatalf("InitSnowflakeWith: %v", err)
+	}
+	if got := SnowflakeMachineID(); got != 9 {
+		t.Fatalf("machineID = %d, want 9", got)
+	}
+	s := defaultSnowflake.Load()
+	if s.clockBackTolerance != time.Second {
+		t.Fatalf("tolerance = %v, want 1s", s.clockBackTolerance)
+	}
+	if s.onClockBack == nil {
+		t.Fatal("onClockBack 未装配")
+	}
+	// 回调可被调用（白盒：直接触发一轮进位生成）。
+	s2 := &Snowflake{epoch: snowflakeEpoch, machineID: 9, clockBackTolerance: time.Second, onClockBack: s.onClockBack, lastTS: time.Now().UnixMilli() + 10_000}
+	s2.next()
+	if gotBack < 9*time.Second {
+		t.Fatalf("回调收到的回拨幅度 = %v, want ≈10s", gotBack)
+	}
+
+	// 缺省路径：InitSnowflake 不带选项 → 容忍上限 5s。
+	resetForTest()
+	if err := InitSnowflake(4); err != nil {
+		t.Fatalf("InitSnowflake: %v", err)
+	}
+	if got := defaultSnowflake.Load().clockBackTolerance; got != defaultClockBackTolerance {
+		t.Fatalf("缺省容忍上限 = %v, want %v", got, defaultClockBackTolerance)
+	}
+}
