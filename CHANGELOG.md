@@ -1,3 +1,16 @@
+## [v0.4.2] — 2026-11-07
+
+- feat(jwt): Sign 新增 WithIssuedAt/WithNow——iat 可注入、exp/iat 同钟源（#64）
+- fix(jwt): WithTTL(0) 从静默产出无 exp 令牌改为 panic + 显式 WithNoExpiry（BREAKING）（#65）
+- feat(jwt): Parse 新增 WithAudience——aud 校验（any-of/缺 aud fail-closed/不设置不校验）（#66）
+- fix(jwt): Parse 对类型异常的注册声明 fail-closed 拒绝——RFC 7519 违规令牌不再静默归零（#67）
+- fix(jwt): Parse 错误链保留（%w: %w）——过期与伪造令牌可 errors.Is 分流（#70）
+- fix(jwt): Sign 拒绝 WithClaim 注入 exp/iss/iat 等保留注册声明——令牌声明注入面关闭（#71）
+- fix(uidgen): Snowflake 时钟回拨策略——容忍上限等待 + 超限进位生成 + OnClockBack 回调，NTP 大幅回拨不再卡死全进程（#72）
+- fix(validator): min/max 校验消息按字段类型区分——数值边界不再误写 "length must be"（#73）
+
+关联问题单：kitx#64、kitx#65、kitx#66、kitx#67、kitx#70、kitx#71、kitx#72、kitx#73。
+
 ## [v0.4.1] — 2026-11-06
 
 - fix(uidgen): alphabet 超限死循环防呆 + epoch doc 修正（kitx#52 #53）
