@@ -1,8 +1,13 @@
-// Package jwt 提供 RS256 的 JWT 签发与校验。
+// Package jwt 提供 JWT 签发与校验，覆盖两种主流形态：RS256（非对称密钥对，
+// Sign/Parse）与 HS256（对称共享密钥，SymmetricSigner/ParseSymmetric，#86）。
+//
+// 两形态共享同一套 SignOption/ParseOption/Claims 与校验语义；每个入口固定自己
+// 的算法（RS256 入口只认 RS256、HS256 入口只认 HS256），密钥形态绑定算法关死
+// alg 混淆。
 //
 // 硬契约（与既有消费方互通，不可改）：
-//   - alg 恰为 RS256
-//   - JWT header 只含 {"alg":"RS256"}，不带 typ
+//   - RS256 形态 alg 恰为 RS256；HS256 形态 alg 恰为 HS256
+//   - JWT header 只含 {"alg":"<alg>"}，不带 typ
 //   - 业务自定义声明平铺进 payload，解析时收集进 Claims.Extra
 package jwt
 
@@ -114,10 +119,23 @@ func WithClaim(key string, val any) SignOption {
 
 // Sign 用 RS256 签发令牌。缺省 iat = time.Now()、ttl = 24h；可用 WithNow/
 // WithIssuedAt 注入签发时刻（iat 与 exp 同钟源），WithNoExpiry 显式去掉 exp。
+// 对称形态（HS256 共享密钥）见 SymmetricSigner（#86）。
 func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	if kp == nil || kp.Private == nil {
 		return "", fmt.Errorf("%w: 缺少私钥", ErrInvalidToken)
 	}
+	payload, err := signPayload(opts)
+	if err != nil {
+		return "", err
+	}
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, gojwt.MapClaims(payload))
+	tok.Header = map[string]any{"alg": "RS256"} // 硬契约：header 只含 alg
+	return tok.SignedString(kp.Private)
+}
+
+// signPayload 应用签发选项并组装 payload（#86：RS256/HS256 两形态共用同一份签发
+// 语义——缺省 ttl=24h、iat/exp 同钟源派生、注册声明注入面防护 #71）。
+func signPayload(opts []SignOption) (map[string]any, error) {
 	o := &signOptions{ttl: 24 * time.Hour, claims: map[string]any{}, nowFn: time.Now}
 	for _, opt := range opts {
 		opt(o)
@@ -125,7 +143,7 @@ func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	// 注册声明注入面 fail-closed（#71）：claims 平铺在注册声明写入之后、
 	// 无条件覆盖，注入保留键 = 顶掉 exp/iss/iat 等的既定值。
 	if hits := reservedClaimHits(o.claims); len(hits) > 0 {
-		return "", fmt.Errorf("%w: WithClaim 不能注入注册声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生", ErrInvalidToken, hits)
+		return nil, fmt.Errorf("%w: WithClaim 不能注入注册声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生", ErrInvalidToken, hits)
 	}
 	now := o.nowFn()
 	payload := map[string]any{}
@@ -148,9 +166,7 @@ func Sign(kp *KeyPair, opts ...SignOption) (string, error) {
 	for k, v := range o.claims {
 		payload[k] = v
 	}
-	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, gojwt.MapClaims(payload))
-	tok.Header = map[string]any{"alg": "RS256"} // 硬契约：header 只含 alg
-	return tok.SignedString(kp.Private)
+	return payload, nil
 }
 
 // parseOptions 是解析选项的内部表示。
@@ -172,7 +188,8 @@ func WithAudience(expected ...string) ParseOption {
 	return func(o *parseOptions) { o.audience = expected }
 }
 
-// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。
+// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。对称形态
+// （HS256 共享密钥）见 ParseSymmetric（#86）——两入口共享校验语义。
 //
 // 错误链保留（#70）：失败时外层哨兵 ErrInvalidToken 与 gojwt 底层 sentinel
 // （ErrTokenExpired/ErrTokenSignatureInvalid/ErrTokenNotValidYet 等）同时可
@@ -191,15 +208,7 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 	for _, opt := range opts {
 		opt(o)
 	}
-	parserOpts := []gojwt.ParserOption{
-		gojwt.WithValidMethods([]string{"RS256"}),
-		gojwt.WithLeeway(o.leeway),
-	}
-	if len(o.audience) > 0 {
-		parserOpts = append(parserOpts, gojwt.WithAudience(o.audience...))
-	}
-	parser := gojwt.NewParser(parserOpts...)
-	tok, err := parser.Parse(token, func(t *gojwt.Token) (any, error) {
+	tok, err := newParser(o, "RS256").Parse(token, func(t *gojwt.Token) (any, error) {
 		return pub, nil
 	})
 	if err != nil {
@@ -213,6 +222,25 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 	if !ok {
 		return nil, fmt.Errorf("%w: 载荷类型异常", ErrInvalidToken)
 	}
+	return claimsFromMap(mc)
+}
+
+// newParser 构造解析器（#86：入口绑定算法——单算法 WithValidMethods 白名单，
+// RS256 入口只认 RS256、HS256 入口只认 HS256，密钥形态绑定算法关死 alg 混淆）。
+func newParser(o *parseOptions, alg string) *gojwt.Parser {
+	parserOpts := []gojwt.ParserOption{
+		gojwt.WithValidMethods([]string{alg}),
+		gojwt.WithLeeway(o.leeway),
+	}
+	if len(o.audience) > 0 {
+		parserOpts = append(parserOpts, gojwt.WithAudience(o.audience...))
+	}
+	return gojwt.NewParser(parserOpts...)
+}
+
+// claimsFromMap 把 MapClaims 收进 Claims（#86：RS256/HS256 两入口共享同一份
+// claims 收集与类型校验语义——#67 类型异常 fail-closed、#70 错误链对两形态同效）。
+func claimsFromMap(mc gojwt.MapClaims) (*Claims, error) {
 	iss, err := mapStr(mc, "iss")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
