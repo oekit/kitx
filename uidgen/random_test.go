@@ -1,10 +1,20 @@
 package uidgen
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+// stubRandRead 注入必然失败的 crypto/rand 桩（#87 验收判据：注入必然失败的桩，
+// 断言 E 版返回 error 且不 panic、panic 版行为不变）。经 t.Cleanup 自动恢复。
+func stubRandRead(t *testing.T) {
+	t.Helper()
+	old := randRead
+	randRead = func(b []byte) (int, error) { return 0, errors.New("getrandom: broken") }
+	t.Cleanup(func() { randRead = old })
+}
 
 func TestRandomHexLengthAndCharset(t *testing.T) {
 	s := RandomHex(16)
@@ -206,4 +216,126 @@ func TestRandomString_LargeMultibyteAlphabet_Works(t *testing.T) {
 			t.Fatalf("字符 %q 不在 alphabet 内", r)
 		}
 	}
+}
+
+// TestRandomHexE_Success E 版正常路径与 RandomHex 同输出形态（#87）。
+func TestRandomHexE_Success(t *testing.T) {
+	s, err := RandomHexE(16)
+	if err != nil {
+		t.Fatalf("RandomHexE() error = %v", err)
+	}
+	if len(s) != 32 {
+		t.Fatalf("16 字节应为 32 hex 字符，得到 %d", len(s))
+	}
+}
+
+// TestRandomHexE_RandFailureReturnsError 锁定 #87：crypto/rand 读取失败返回
+// error 且不 panic——请求路径可就地降级，不必吞错也不必进程崩溃。
+func TestRandomHexE_RandFailureReturnsError(t *testing.T) {
+	stubRandRead(t)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("RandomHexE rand 失败必须返回 error 而非 panic（#87），got %v", r)
+		}
+	}()
+	s, err := RandomHexE(16)
+	if err == nil {
+		t.Fatalf("RandomHexE 必须返回 error, got %q", s)
+	}
+	if !strings.Contains(err.Error(), "crypto/rand 不可用") {
+		t.Fatalf("错误文案应说明 crypto/rand 不可用, got %v", err)
+	}
+}
+
+// TestRandomHexE_NonPositivePanics 入参非法仍 panic——E 变体只改运行期故障的
+// 出口，不改入参防呆（#87 验收判据）。
+func TestRandomHexE_NonPositivePanics(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RandomHexE(%d) 应 panic（入参防呆不变，#87）", n)
+				}
+			}()
+			_, _ = RandomHexE(n)
+		}()
+	}
+}
+
+// TestRandomHex_RandFailureStillPanics panic 版行为不变（#87 验收判据：防止无意
+// 改语义）。
+func TestRandomHex_RandFailureStillPanics(t *testing.T) {
+	stubRandRead(t)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("RandomHex rand 失败应保持 panic 语义")
+		}
+	}()
+	RandomHex(16)
+}
+
+// TestRandomStringE_Success E 版正常路径：与 RandomString 同实现同输出形态
+// （多字节 alphabet 产合法 UTF-8，#87 与 #88/#89 同族一致）。
+func TestRandomStringE_Success(t *testing.T) {
+	s, err := RandomStringE("abc中文", 20)
+	if err != nil {
+		t.Fatalf("RandomStringE() error = %v", err)
+	}
+	if !utf8.ValidString(s) {
+		t.Fatalf("输出非法 UTF-8: %q", s)
+	}
+	if utf8.RuneCountInString(s) != 20 {
+		t.Fatalf("输出 %d 个字符, want 20", utf8.RuneCountInString(s))
+	}
+}
+
+// TestRandomStringE_RandFailureReturnsError 锁定 #87：rand 失败返回 error 不 panic。
+func TestRandomStringE_RandFailureReturnsError(t *testing.T) {
+	stubRandRead(t)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("RandomStringE rand 失败必须返回 error 而非 panic（#87），got %v", r)
+		}
+	}()
+	s, err := RandomStringE("abc", 10)
+	if err == nil {
+		t.Fatalf("RandomStringE 必须返回 error, got %q", s)
+	}
+	if !strings.Contains(err.Error(), "crypto/rand 不可用") {
+		t.Fatalf("错误文案应说明 crypto/rand 不可用, got %v", err)
+	}
+}
+
+// TestRandomStringE_InputValidationStillPanics 三类非法入参（n<=0 / 空 alphabet /
+// 字符数 >256）在 E 版同样 panic（#87：入参防呆不变）。
+func TestRandomStringE_InputValidationStillPanics(t *testing.T) {
+	var tooLarge []rune
+	for i := 0; i < 300; i++ {
+		tooLarge = append(tooLarge, rune(0x80+i))
+	}
+	for name, fn := range map[string]func() error{
+		"n<=0":         func() error { _, err := RandomStringE("abc", 0); return err },
+		"空 alphabet":   func() error { _, err := RandomStringE("", 5); return err },
+		"alphabet>256": func() error { _, err := RandomStringE(string(tooLarge), 5); return err },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RandomStringE [%s] 应 panic（入参防呆不变，#87）", name)
+				}
+			}()
+			_ = fn()
+		}()
+	}
+}
+
+// TestRandomString_RandFailureStillPanics panic 版行为不变（#87 验收判据）。
+func TestRandomString_RandFailureStillPanics(t *testing.T) {
+	stubRandRead(t)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("RandomString rand 失败应保持 panic 语义")
+		}
+	}()
+	RandomString("abc", 10)
 }
