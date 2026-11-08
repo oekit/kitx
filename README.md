@@ -1,6 +1,6 @@
 # kitx
 
-> 标识与校验——Snowflake / ULID / UUID / 随机串 + 非密码学哈希助手 + go-playground/validator 门面 + RS256 JWT
+> 标识与校验——Snowflake / ULID / UUID / 随机串 + 非密码学哈希助手 + go-playground/validator 门面 + JWT（RS256 非对称 / HS256 对称共享密钥）
 
 > 🌐 项目主页：**https://oekit.github.io/** · 名称由来：**O**pen **E**asy **Kit**（开源 · 易用 · 工具集合）
 > 🤖 AI Agent：本仓规范与硬规则见 [AGENTS.md](AGENTS.md)；机器可读索引见 [llms.txt](https://oekit.github.io/llms.txt)（接口签名以源码为准）。
@@ -25,16 +25,19 @@ go get github.com/oekit/kitx@v0.4.3
 - `validator` —— go-playground/validator 的接口化门面：struct tag 校验、
   自定义规则注册、`ValidationError`（`Unwrap` 为 `pkg/errors` BizError 400，
   `middleware.Fail` 自动映射 HTTP 400）
-- `jwt` —— RS256 JWT 签发与校验：header 只含 `{"alg":"RS256"}` 不带 typ（与
-  Nimbus/既有消费方互通）、业务声明经 `WithClaim` 平铺 / `Claims.Extra` 收集、
-  PEM 密钥对（PKCS#1/PKCS#8 私钥，PKIX/PKCS#1/X.509 证书公钥）
+- `jwt` —— JWT 签发与校验，RS256（非对称密钥对）与 HS256（对称共享密钥）两种
+  主流形态共享同一套 SignOption/ParseOption/Claims 与校验语义，每入口固定算法
+  白名单关死 alg 混淆：header 只含 `{"alg":"..."}` 不带 typ（与 Nimbus/既有消费
+  方互通）、业务声明经 `WithClaim` 平铺 / `Claims.Extra` 收集、PEM 密钥对
+  （PKCS#1/PKCS#8 私钥，PKIX/PKCS#1/X.509 证书公钥）、HS256 secret ≥32 字节
+  构造期 fail-fast（RFC 7518 §3.2）
 
 ## 组成
 
 | 包 | import 路径 | 做什么 |
 |---|---|---|
 | `hash` | `github.com/oekit/kitx/hash` | `Md5Hex(s)`（32 位小写 hex）/ `Md5Bytes(b)`（16 字节）——非密码学场景专用（缓存键/幂等键/短唯一 code），输出格式稳定承诺永不更换；密码学摘要用 pkg/encoding Sha256Hex |
-| `jwt` | `github.com/oekit/kitx/jwt` | `Sign(kp, opts...)` / `Parse(token, pub, opts...)`：RS256-only，header 只含 alg 不带 typ；`WithIssuer/Subject/JTI/TTL/NotBefore/Claim` 签发选项、`WithLeeway` 解析选项；claims 经 `Extra` 平铺收集；`KeyPair`/`GenerateKeyPair`/`MarshalKeyPairPEM`/`ParsePrivateKey`/`ParsePublicKey`（含 X.509 证书公钥） |
+| `jwt` | `github.com/oekit/kitx/jwt` | RS256：`Sign(kp, opts...)` / `Parse(token, pub, opts...)`；HS256 对称共享密钥（#86）：`NewSymmetric(secret)`（≥32 字节构造期 fail-fast）/ `SymmetricSigner.Sign(opts...)` / `ParseSymmetric(token, secret, opts...)`——两形态共享 `WithIssuer/Subject/JTI/TTL/NoExpiry/NotBefore/Claim` 签发选项与 `WithLeeway/WithAudience` 解析选项，header 只含 alg 不带 typ，入口绑定算法（RS256 入口只认 RS256、HS256 入口只认 HS256）关死 alg 混淆；claims 经 `Extra` 平铺收集；`KeyPair`/`GenerateKeyPair`/`MarshalKeyPairPEM`/`ParsePrivateKey`/`ParsePublicKey`（含 X.509 证书公钥） |
 | `uidgen` | `github.com/oekit/kitx/uidgen` | `InitSnowflake(machineID)` / `SnowflakeID()`（不返错，auto-init 兜底）+ `ExtractSnowflake*` 元数据；`UUID`/`ShortUUID`/`UUIDToUpper`/`ShortUUIDToUpper`/`UUIDWithHyphen`（手写 v4，零第三方）；`ULID()`/`ULIDFromTime(t)`/`ParseULID(s)`（26 字符 ULID，Crockford Base32，字典序 = 时间序，同毫秒严格递增，与 oklog/ulid 位兼容）；`RandomHex(n)` / `RandomString(alphabet, n)`（crypto/rand，拒绝采样；RandomString 按 rune 采样产合法 UTF-8，非法入参 panic——n<=0、空 alphabet、alphabet>256 字符）+ `RandomHexE`/`RandomStringE` error 返回变体（入参防呆不变，rand 读取失败返 error） |
 | `validator` | `github.com/oekit/kitx/validator` | `Validate(obj)` / `ValidateVar(field, tag)` / `ValidateVarNamed(field, fieldName, tag)`（struct tag；单变量校验用 Named 变体带字段名，`ValidateVar` 的字段名退化为兜底主语 "value"）；`RegisterValidation`（⚠️ 仅限 init 阶段，底层注册非并发安全）；`ValidationError.Errors()/Map()/Len()` 结构化字段错误；`SetDefault`/`Default` 可替换实现（atomic.Pointer 并发安全） |
 
