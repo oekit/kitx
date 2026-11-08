@@ -454,7 +454,7 @@ func TestRandomHexFrom_NilReaderPanics(t *testing.T) {
 			t.Fatal("RandomHexFrom(nil, 8) 应 panic")
 		}
 	}()
-	RandomHexFrom(nil, 8)
+	_, _ = RandomHexFrom(nil, 8)
 }
 
 // TestRandomHexFrom_NonPositivePanics 负对照：From 版入参校验与 panic 版完全
@@ -467,7 +467,7 @@ func TestRandomHexFrom_NonPositivePanics(t *testing.T) {
 					t.Fatalf("RandomHexFrom(reader, %d) 应 panic（非法长度=调用方 bug）", n)
 				}
 			}()
-			RandomHexFrom(bytes.NewReader([]byte{1}), n)
+			_, _ = RandomHexFrom(bytes.NewReader([]byte{1}), n)
 		}()
 	}
 }
@@ -481,10 +481,10 @@ func TestRandomStringFrom_InputValidationPanics(t *testing.T) {
 		tooLarge = append(tooLarge, rune(0x80+i))
 	}
 	for name, fn := range map[string]func(){
-		"nil reader":   func() { RandomStringFrom(nil, "abc", 8) },
-		"n<=0":         func() { RandomStringFrom(nil, "abc", 0) },
-		"空 alphabet":   func() { RandomStringFrom(bytes.NewReader([]byte{1}), "", 5) },
-		"alphabet>256": func() { RandomStringFrom(bytes.NewReader([]byte{1}), string(tooLarge), 5) },
+		"nil reader":   func() { _, _ = RandomStringFrom(nil, "abc", 8) },
+		"n<=0":         func() { _, _ = RandomStringFrom(nil, "abc", 0) },
+		"空 alphabet":   func() { _, _ = RandomStringFrom(bytes.NewReader([]byte{1}), "", 5) },
+		"alphabet>256": func() { _, _ = RandomStringFrom(bytes.NewReader([]byte{1}), string(tooLarge), 5) },
 	} {
 		func() {
 			defer func() {
