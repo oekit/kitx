@@ -1,7 +1,10 @@
 package uidgen
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"math/rand"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -338,4 +341,243 @@ func TestRandomString_RandFailureStillPanics(t *testing.T) {
 		}
 	}()
 	RandomString("abc", 10)
+}
+
+// ---------------------------------------------------------------------------
+// #87 后续：显式随机源变体 RandomHexFrom/RandomStringFrom(io.Reader)——
+// 专供测试注入确定性/必然失败的随机源（与 E 版共用同一份取样核心 sampleRunes）
+// ---------------------------------------------------------------------------
+
+// errBoom 必然失败的随机源自报错误（单例，便于 errors.Is 断言）。
+var errBoom = errors.New("boom")
+
+// eofReader 每次读都返回 io.EOF（必然失败的随机源）。
+type eofReader struct{}
+
+func (eofReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
+// boomReader 每次读都返回业务错误（必然失败的随机源）。
+type boomReader struct{}
+
+func (boomReader) Read(p []byte) (int, error) { return 0, errBoom }
+
+// shortReader 短读形态 reader：每次最多吐 max 字节，底层读尽后返回 io.EOF。
+type shortReader struct {
+	r   io.Reader
+	max int
+}
+
+func (s *shortReader) Read(p []byte) (int, error) {
+	if len(p) > s.max {
+		p = p[:s.max]
+	}
+	return s.r.Read(p)
+}
+
+// detBytes 用 math/rand 造一段确定性字节流（不触碰顶层 rand.Read）。
+func detBytes(seed int64, n int) []byte {
+	rr := rand.New(rand.NewSource(seed))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(rr.Uint64())
+	}
+	return b
+}
+
+// TestRandomHexFrom_FailingReaderReturnsError #87 注入形态主判据：显式随机源
+// 读取失败返回 error 且**不 panic**（EOF 与业务错误两形态，errors.Is 可判定，
+// 失败不返回半截产物）。
+func TestRandomHexFrom_FailingReaderReturnsError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    io.Reader
+		want error
+	}{
+		{"EOF", eofReader{}, io.EOF},
+		{"boom", boomReader{}, errBoom},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("RandomHexFrom(%s) 不应 panic，得到 %v", tc.name, r)
+				}
+			}()
+			s, err := RandomHexFrom(tc.r, 8)
+			if err == nil {
+				t.Fatalf("RandomHexFrom(%s) 应返回 error，得到 (%q, nil)", tc.name, s)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("RandomHexFrom(%s) err = %v，want %v", tc.name, err, tc.want)
+			}
+			if s != "" {
+				t.Fatalf("失败时不应返回半截产物，得到 %q", s)
+			}
+		}()
+	}
+}
+
+// TestRandomStringFrom_FailingReaderReturnsError 同款主判据（RandomStringFrom）。
+func TestRandomStringFrom_FailingReaderReturnsError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    io.Reader
+		want error
+	}{
+		{"EOF", eofReader{}, io.EOF},
+		{"boom", boomReader{}, errBoom},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("RandomStringFrom(%s) 不应 panic，得到 %v", tc.name, r)
+				}
+			}()
+			s, err := RandomStringFrom(tc.r, "abc", 8)
+			if err == nil {
+				t.Fatalf("RandomStringFrom(%s) 应返回 error，得到 (%q, nil)", tc.name, s)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("RandomStringFrom(%s) err = %v，want %v", tc.name, err, tc.want)
+			}
+			if s != "" {
+				t.Fatalf("失败时不应返回半截产物，得到 %q", s)
+			}
+		}()
+	}
+}
+
+// TestRandomHexFrom_NilReaderPanics：nil reader 是非法入参，构造期当场暴露
+// （对齐 #50 哲学——From 版的显式源是调用方的承诺，nil 不是「用默认」）。
+func TestRandomHexFrom_NilReaderPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("RandomHexFrom(nil, 8) 应 panic")
+		}
+	}()
+	RandomHexFrom(nil, 8)
+}
+
+// TestRandomHexFrom_NonPositivePanics 负对照：From 版入参校验与 panic 版完全
+// 一致（checkHexArgs 单一来源）——非正长度仍是调用方 bug（#50）。
+func TestRandomHexFrom_NonPositivePanics(t *testing.T) {
+	for _, n := range []int{0, -1, -32} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RandomHexFrom(reader, %d) 应 panic（非法长度=调用方 bug）", n)
+				}
+			}()
+			RandomHexFrom(bytes.NewReader([]byte{1}), n)
+		}()
+	}
+}
+
+// TestRandomStringFrom_InputValidationPanics 负对照：From 版入参校验与 panic 版
+// 完全一致（checkStringArgs 单一来源，#87/#88/#89 同族口径）——nil reader /
+// n<=0 / 空 alphabet / 字符数 >256 全部 panic。
+func TestRandomStringFrom_InputValidationPanics(t *testing.T) {
+	var tooLarge []rune
+	for i := 0; i < 300; i++ {
+		tooLarge = append(tooLarge, rune(0x80+i))
+	}
+	for name, fn := range map[string]func(){
+		"nil reader":   func() { RandomStringFrom(nil, "abc", 8) },
+		"n<=0":         func() { RandomStringFrom(nil, "abc", 0) },
+		"空 alphabet":   func() { RandomStringFrom(bytes.NewReader([]byte{1}), "", 5) },
+		"alphabet>256": func() { RandomStringFrom(bytes.NewReader([]byte{1}), string(tooLarge), 5) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RandomStringFrom [%s] 应 panic（入参防呆不变）", name)
+				}
+			}()
+			fn()
+		}()
+	}
+}
+
+// TestRandomHexFrom_DeterministicBytes 注入固定字节验证 hex 编码逐字节正确。
+func TestRandomHexFrom_DeterministicBytes(t *testing.T) {
+	s, err := RandomHexFrom(bytes.NewReader([]byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67}), 8)
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if s != "deadbeef01234567" {
+		t.Fatalf("得到 %q，want %q", s, "deadbeef01234567")
+	}
+}
+
+// TestRandomHexFrom_ShortReadReader 短读 reader（每次只吐 3 字节后 EOF）也必须
+// 读满——io.ReadFull 循环语义（#87）。
+func TestRandomHexFrom_ShortReadReader(t *testing.T) {
+	raw := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67}
+	s, err := RandomHexFrom(&shortReader{r: bytes.NewReader(raw), max: 3}, 8)
+	if err != nil {
+		t.Fatalf("短读 reader 应被读满而非报错: %v", err)
+	}
+	if s != "deadbeef01234567" {
+		t.Fatalf("得到 %q，want %q", s, "deadbeef01234567")
+	}
+}
+
+// TestRandomStringFrom_DeterministicRejectionSampling 注入确定性随机源
+// （math/rand seed 1）验证拒绝采样无越界：31 字符表 256%31=8 ⇒ maxMultiple=248，
+// 拒绝路径被真实踩到；混合 alphabet（#89 rune 口径）产合法 UTF-8 且恰 n 个字符；
+// 同种子输出可复现。
+func TestRandomStringFrom_DeterministicRejectionSampling(t *testing.T) {
+	const ascii = "abcdefghjkmnpqrstuvwxyz23456789"
+	s, err := RandomStringFrom(rand.New(rand.NewSource(1)), ascii, 500)
+	if err != nil {
+		t.Fatalf("确定性随机源不应返回 error: %v", err)
+	}
+	if len(s) != 500 {
+		t.Fatalf("长度 %d != 500", len(s))
+	}
+	for _, c := range []byte(s) {
+		if indexAny(ascii, c) < 0 {
+			t.Fatalf("字符 %q 不在 alphabet 内（拒绝采样越界）", string(c))
+		}
+	}
+	const mixed = "abc中文"
+	m, err := RandomStringFrom(rand.New(rand.NewSource(1)), mixed, 100)
+	if err != nil {
+		t.Fatalf("确定性随机源不应返回 error: %v", err)
+	}
+	if !utf8.ValidString(m) {
+		t.Fatalf("多字节 alphabet 输出非法 UTF-8: %q", m)
+	}
+	if utf8.RuneCountInString(m) != 100 {
+		t.Fatalf("输出 %d 个字符，want 100", utf8.RuneCountInString(m))
+	}
+	for _, r := range m {
+		if !strings.ContainsRune(mixed, r) {
+			t.Fatalf("字符 %q 不在 alphabet 内（拒绝采样越界）", r)
+		}
+	}
+	again, err := RandomStringFrom(rand.New(rand.NewSource(1)), ascii, 500)
+	if err != nil {
+		t.Fatalf("确定性随机源不应返回 error: %v", err)
+	}
+	if s != again {
+		t.Fatal("同种子两次生成应产出相同序列（确定性注入）")
+	}
+}
+
+// TestRandomStringFrom_ShortReadReader 短读形态下取样循环也能读满（多轮读取拉块
+// + 拒绝采样跨块继续），输出仍合法且恰 n 个字符。
+func TestRandomStringFrom_ShortReadReader(t *testing.T) {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	s, err := RandomStringFrom(&shortReader{r: bytes.NewReader(detBytes(7, 4096)), max: 3}, alphabet, 200)
+	if err != nil {
+		t.Fatalf("短读 reader 应被读满而非报错: %v", err)
+	}
+	if utf8.RuneCountInString(s) != 200 {
+		t.Fatalf("输出 %d 个字符，want 200", utf8.RuneCountInString(s))
+	}
+	for _, c := range []byte(s) {
+		if indexAny(alphabet, c) < 0 {
+			t.Fatalf("字符 %q 不在 alphabet 内（拒绝采样越界）", string(c))
+		}
+	}
 }

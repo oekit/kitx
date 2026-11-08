@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strconv"
 )
 
@@ -40,6 +41,23 @@ func RandomHexE(nBytes int) (string, error) {
 	b, err := randomBytes(nBytes)
 	if err != nil {
 		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// RandomHexFrom 是 RandomHex 的显式随机源变体（#87）：从 r 读满 nBytes 字节后
+// hex 编码，专供测试注入确定性/必然失败的随机源（也供调用方自带可信随机源）。
+// 入参校验与 RandomHex 同款（nBytes <= 0 panic，checkHexArgs 单一来源）；nil
+// reader 视为非法入参 panic——显式源是调用方的承诺，nil 不是「用默认」。
+// 读取语义 io.ReadFull：注入短读 reader（如每次只吐 3 字节）循环读满。
+func RandomHexFrom(r io.Reader, nBytes int) (string, error) {
+	checkHexArgs(nBytes)
+	if r == nil {
+		panic("uidgen: RandomHexFrom 随机源 reader 为 nil")
+	}
+	b := make([]byte, nBytes)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", fmt.Errorf("uidgen: 随机源读取失败: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }
@@ -84,10 +102,23 @@ func RandomString(alphabet string, n int) string {
 
 // RandomStringE 是 RandomString 的 error 返回变体（#87）：入参校验与 RandomString
 // 完全一致（n <= 0 / 空 alphabet / 字符数 >256 仍 panic——非法入参是调用方 bug）；
-// 差异仅在 crypto/rand 读取失败这一运行期环境故障返回 error 而非 panic。与
-// RandomString 共用同一份拒绝采样实现（无第二份 256%len 偏差修复代码）。
+// 差异仅在 crypto/rand 读取失败这一运行期环境故障返回 error 而非 panic。取样经
+// 共享核心 sampleRunes（显式随机源变体 RandomStringFrom 同款），拒绝采样实现
+// 只此一份（无第二份 256%len 偏差修复代码）。
 func RandomStringE(alphabet string, n int) (string, error) {
 	runes := checkStringArgs(alphabet, n)
+	s, err := sampleRunes(randRead, runes, n)
+	if err != nil {
+		return "", fmt.Errorf("uidgen: crypto/rand 不可用: %w", err)
+	}
+	return s, nil
+}
+
+// sampleRunes 是 RandomString 族（panic/E/From 三形态）的共享取样核心（#87）：
+// 拒绝采样（256%len 偏差修复）只此一份——read 抽象让 E 版（randRead 桩注入）与
+// From 版（io.Reader 注入）共用同一份循环与单字符快路径。read 必须填满 b 或返回
+// 错误（crypto/rand.Read 天然如此；From 版经 io.ReadFull 达成同一语义）。
+func sampleRunes(read func([]byte) (int, error), runes []rune, n int) (string, error) {
 	if len(runes) == 1 {
 		out := make([]rune, n)
 		for i := range out {
@@ -100,8 +131,8 @@ func RandomStringE(alphabet string, n int) (string, error) {
 	out := make([]rune, 0, n)
 	buf := make([]byte, n+8)
 	for len(out) < n {
-		if _, err := randRead(buf); err != nil {
-			return "", fmt.Errorf("uidgen: crypto/rand 不可用: %w", err)
+		if _, err := read(buf); err != nil {
+			return "", err
 		}
 		for _, c := range buf {
 			if int(c) < maxMultiple {
@@ -113,6 +144,23 @@ func RandomStringE(alphabet string, n int) (string, error) {
 		}
 	}
 	return string(out), nil
+}
+
+// RandomStringFrom 是 RandomString 的显式随机源变体（#87）：从 r 取样，与
+// RandomString/RandomStringE 共用同一份拒绝采样实现（sampleRunes，无第二份
+// 256%len 偏差修复代码）。入参校验同 panic 版（n<=0 / 空 alphabet / 字符数
+// >256 panic，checkStringArgs 单一来源）；nil reader 视为非法入参 panic。
+// 读取语义 io.ReadFull：注入短读 reader（如每次只吐 3 字节）循环读满。
+func RandomStringFrom(r io.Reader, alphabet string, n int) (string, error) {
+	runes := checkStringArgs(alphabet, n)
+	if r == nil {
+		panic("uidgen: RandomStringFrom 随机源 reader 为 nil")
+	}
+	s, err := sampleRunes(func(b []byte) (int, error) { return io.ReadFull(r, b) }, runes, n)
+	if err != nil {
+		return "", fmt.Errorf("uidgen: 随机源读取失败: %w", err)
+	}
+	return s, nil
 }
 
 // checkStringArgs 校验 RandomString/RandomStringE 的入参并返回 rune 形态的
