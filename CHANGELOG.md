@@ -1,3 +1,13 @@
+## [v0.5.0] — 2026-11-09
+
+- feat(uidgen): `RandomHexE`/`RandomStringE` error 返回变体（kitx#87）——crypto/rand 读取失败这一**运行期环境故障**从 panic 改为返回 error：请求路径（nonce/token/上传会话 ID）可就地降级，下游不必再因「没有 error 出口」而 `_, _ = rand.Read(b)` 吞错发出弱值或手搓 make+rand.Read+hex；入参防呆不变（非法入参仍 panic，对齐 #50 哲学）
+- feat(uidgen): `RandomHexFrom`/`RandomStringFrom(io.Reader)` 显式随机源变体（kitx#87）——专供测试注入确定性/必然失败随机源，nil reader 视为非法入参 panic；取样经共享核心 `sampleRunes` 与 E 版共用同一份实现（无第二份 256%len 偏差修复代码）；读取语义 io.ReadFull，注入短读 reader 循环读满
+- **BREAKING** fix(uidgen): `RandomString(alphabet, n<=0)` 从静默空串改为 panic（kitx#88）——与 #50 对 `RandomHex` 的修法同口径：空串密钥是最危险的缺省（空 HMAC key 可被任意伪造、空 token 落库与「无 token」不可区分）
+- **BREAKING** fix(uidgen): `RandomString` 采样从字节口径改为 rune 口径（kitx#89）——多字节 alphabet 产出恰 n 个字符的合法 UTF-8（旧口径产孤立带头/续字节，进 JSON/DB utf8 列/日志即损坏）；`>256` panic 判据同步改按字符数计（300 字节的 100 个「字」不再被 #52 判据误杀）
+- feat(jwt): HS256 对称形态 `NewSymmetric`/`SymmetricSigner`/`ParseSymmetric`——与 RS256 共享同一套选项与校验语义，入口绑定算法白名单关死 alg 混淆（kitx#86）
+
+关联问题单：kitx#86、kitx#87、kitx#88、kitx#89。
+
 ## [v0.4.3] — 2026-11-08
 
 - build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）
