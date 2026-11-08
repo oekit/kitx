@@ -19,7 +19,8 @@ go get github.com/oekit/kitx@v0.4.3
 - `uidgen` —— 分布式唯一 ID 与随机串：Snowflake（全局单例 + Extract 元数据提取）、
   RFC 4122 v4 UUID（**标准库手写，零第三方依赖**，语义与 google/uuid 对齐）、
   ULID（26 字符，**字典序 = 时间序**，同毫秒内严格递增，面向文本主键 + range scan）、
-  crypto/rand 随机串（RandomHex / 拒绝采样 RandomString，无 mod 偏置）
+  crypto/rand 随机串（RandomHex / 拒绝采样 RandomString，无 mod 偏置；
+  RandomString 按 rune 采样，多字节 alphabet 产出合法 UTF-8，n<=0/空 alphabet/>256 字符 panic）
 - `validator` —— go-playground/validator 的接口化门面：struct tag 校验、
   自定义规则注册、`ValidationError`（`Unwrap` 为 `pkg/errors` BizError 400，
   `middleware.Fail` 自动映射 HTTP 400）
@@ -33,7 +34,7 @@ go get github.com/oekit/kitx@v0.4.3
 |---|---|---|
 | `hash` | `github.com/oekit/kitx/hash` | `Md5Hex(s)`（32 位小写 hex）/ `Md5Bytes(b)`（16 字节）——非密码学场景专用（缓存键/幂等键/短唯一 code），输出格式稳定承诺永不更换；密码学摘要用 pkg/encoding Sha256Hex |
 | `jwt` | `github.com/oekit/kitx/jwt` | `Sign(kp, opts...)` / `Parse(token, pub, opts...)`：RS256-only，header 只含 alg 不带 typ；`WithIssuer/Subject/JTI/TTL/NotBefore/Claim` 签发选项、`WithLeeway` 解析选项；claims 经 `Extra` 平铺收集；`KeyPair`/`GenerateKeyPair`/`MarshalKeyPairPEM`/`ParsePrivateKey`/`ParsePublicKey`（含 X.509 证书公钥） |
-| `uidgen` | `github.com/oekit/kitx/uidgen` | `InitSnowflake(machineID)` / `SnowflakeID()`（不返错，auto-init 兜底）+ `ExtractSnowflake*` 元数据；`UUID`/`ShortUUID`/`UUIDToUpper`/`ShortUUIDToUpper`/`UUIDWithHyphen`（手写 v4，零第三方）；`ULID()`/`ULIDFromTime(t)`/`ParseULID(s)`（26 字符 ULID，Crockford Base32，字典序 = 时间序，同毫秒严格递增，与 oklog/ulid 位兼容）；`RandomHex(n)` / `RandomString(alphabet, n)`（crypto/rand，拒绝采样） |
+| `uidgen` | `github.com/oekit/kitx/uidgen` | `InitSnowflake(machineID)` / `SnowflakeID()`（不返错，auto-init 兜底）+ `ExtractSnowflake*` 元数据；`UUID`/`ShortUUID`/`UUIDToUpper`/`ShortUUIDToUpper`/`UUIDWithHyphen`（手写 v4，零第三方）；`ULID()`/`ULIDFromTime(t)`/`ParseULID(s)`（26 字符 ULID，Crockford Base32，字典序 = 时间序，同毫秒严格递增，与 oklog/ulid 位兼容）；`RandomHex(n)` / `RandomString(alphabet, n)`（crypto/rand，拒绝采样；RandomString 按 rune 采样产合法 UTF-8，非法入参 panic——n<=0、空 alphabet、alphabet>256 字符） |
 | `validator` | `github.com/oekit/kitx/validator` | `Validate(obj)` / `ValidateVar(field, tag)` / `ValidateVarNamed(field, fieldName, tag)`（struct tag；单变量校验用 Named 变体带字段名，`ValidateVar` 的字段名退化为兜底主语 "value"）；`RegisterValidation`（⚠️ 仅限 init 阶段，底层注册非并发安全）；`ValidationError.Errors()/Map()/Len()` 结构化字段错误；`SetDefault`/`Default` 可替换实现（atomic.Pointer 并发安全） |
 
 ## 快速使用

@@ -27,28 +27,30 @@ func RandomHex(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
-// RandomString 从 alphabet 均匀采样 n 个字符（拒绝采样消模偏差，无 mod 偏置）。
-// alphabet 为空时 panic。适用：带自定义字符集的短 ID/令牌。
+// RandomString 从 alphabet 均匀采样 n 个字符（rune 语义：多字节 alphabet 产出
+// 合法 UTF-8，输出恰含 n 个字符；#89）——拒绝采样消模偏差，无 mod 偏置。
+//
+// 入参防呆（全部当场 panic）：
+//   - n <= 0 直接 panic（#88）：与 #50 对 RandomHex 的修法同口径——空串密钥是
+//     最危险的缺省（「名义生成了、实际是空钥匙」），长度来自配置面时请在构造
+//     期校验；
+//   - alphabet 为空 panic；
+//   - alphabet 字符数 > 256 panic（#52：拒绝采样 maxMultiple 归 0 ⇒ 死循环；
+//     #89 起判据按 rune 数计，字节口径下的多字节大字符集不再被误伤）。
+//
+// 适用：带自定义字符集的短 ID/令牌。
 func RandomString(alphabet string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(alphabet) == 0 {
-		panic("uidgen: 空 alphabet")
-	}
-	if len(alphabet) > 256 {
-		panic(fmt.Sprintf("uidgen: alphabet 字节数 %d > 256，拒绝采样 maxMultiple 归 0 ⇒ RandomString 死循环（#52）——非法入参当场暴露（对齐 #50 哲学）", len(alphabet)))
-	}
-	if len(alphabet) == 1 {
-		out := make([]byte, n)
+	runes := checkStringArgs(alphabet, n)
+	if len(runes) == 1 {
+		out := make([]rune, n)
 		for i := range out {
-			out[i] = alphabet[0]
+			out[i] = runes[0]
 		}
 		return string(out)
 	}
 	// 拒绝采样：256 % len 会造成高位取值偏差，丢弃 >= maxMultiple 的字节。
-	maxMultiple := 256 - 256%len(alphabet)
-	out := make([]byte, 0, n)
+	maxMultiple := 256 - 256%len(runes)
+	out := make([]rune, 0, n)
 	buf := make([]byte, n+8)
 	for len(out) < n {
 		if _, err := rand.Read(buf); err != nil {
@@ -56,7 +58,7 @@ func RandomString(alphabet string, n int) string {
 		}
 		for _, c := range buf {
 			if int(c) < maxMultiple {
-				out = append(out, alphabet[int(c)%len(alphabet)])
+				out = append(out, runes[int(c)%len(runes)])
 				if len(out) == n {
 					break
 				}
@@ -64,4 +66,20 @@ func RandomString(alphabet string, n int) string {
 		}
 	}
 	return string(out)
+}
+
+// checkStringArgs 校验 RandomString 的入参并返回 rune 形态的 alphabet（#89 起
+// 全程按字符处理）：非法入参 panic 当场暴露，不静默降级。
+func checkStringArgs(alphabet string, n int) []rune {
+	if n <= 0 {
+		panic(fmt.Sprintf("uidgen: RandomString 采样长度必须为正（got %d）——空串密钥是最危险的缺省，密钥/凭据场景漏个非正长度必须当场暴露（#88，对齐 #50）", n))
+	}
+	if len(alphabet) == 0 {
+		panic("uidgen: 空 alphabet")
+	}
+	runes := []rune(alphabet)
+	if len(runes) > 256 {
+		panic(fmt.Sprintf("uidgen: alphabet 字符数 %d > 256，拒绝采样 maxMultiple 归 0 ⇒ RandomString 死循环（#52）——非法入参当场暴露（对齐 #50 哲学）", len(runes)))
+	}
+	return runes
 }
