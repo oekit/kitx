@@ -1,3 +1,12 @@
+## [v0.6.0] — 2026-11-10
+
+- - fix(validator): RegisterValidation nil 规则注册期返回 ErrNilValidationFunc、受限 tag panic 转校验失败、规则 panic 就地隔离（#94）
+- - feat(jwt): WithExpectedIssuer——iss 严格相等且必须存在的 fail-closed 校验（#95）
+- - fix(jwt): MarshalKeyPairPEM 缺 Public 对称返回 error（#96）
+- - feat(jwt): Manager/IssuePair/ParseTyped/Refresh 双令牌对原语——token_type 入 reservedClaims，轮换继承会话声明（#97）
+
+关联问题单：kitx#94、kitx#95、kitx#96、kitx#97。
+
 ## [v0.5.0] — 2026-11-09
 
 - feat(uidgen): `RandomHexE`/`RandomStringE` error 返回变体（kitx#87）——crypto/rand 读取失败这一**运行期环境故障**从 panic 改为返回 error：请求路径（nonce/token/上传会话 ID）可就地降级，下游不必再因「没有 error 出口」而 `_, _ = rand.Read(b)` 吞错发出弱值或手搓 make+rand.Read+hex；入参防呆不变（非法入参仍 panic，对齐 #50 哲学）
