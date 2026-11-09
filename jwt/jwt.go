@@ -1,9 +1,11 @@
 // Package jwt 提供 JWT 签发与校验，覆盖两种主流形态：RS256（非对称密钥对，
 // Sign/Parse）与 HS256（对称共享密钥，SymmetricSigner/ParseSymmetric，#86）。
+// 两形态之上另有 access+refresh 双令牌对原语（Manager：成对签发 IssuePair、
+// 分型校验 ParseTyped、refresh 轮换 Refresh，#97）。
 //
 // 两形态共享同一套 SignOption/ParseOption/Claims 与校验语义；每个入口固定自己
 // 的算法（RS256 入口只认 RS256、HS256 入口只认 HS256），密钥形态绑定算法关死
-// alg 混淆。
+// alg 混淆。解析侧校验入口：WithAudience（#66）与 WithExpectedIssuer（#95）。
 //
 // 硬契约（与既有消费方互通，不可改）：
 //   - RS256 形态 alg 恰为 RS256；HS256 形态 alg 恰为 HS256
@@ -41,6 +43,7 @@ type signOptions struct {
 	notBefore *time.Time
 	claims    map[string]any
 	nowFn     func() time.Time
+	tokenType string
 }
 
 // SignOption 是 Sign 的函数选项。
@@ -98,21 +101,24 @@ func WithIssuedAt(t time.Time) SignOption {
 	return func(o *signOptions) { o.nowFn = func() time.Time { return t } }
 }
 
-// reservedClaims 是 RFC 7519 §4.1 注册声明名。kitx/jwt 为它们提供专属签发
-// 通道（WithIssuer/WithSubject/WithJTI/WithNotBefore；exp/iat 由 WithTTL/
-// WithNoExpiry 与签发时钟派生），业务声明不得占用这些键。
+// reservedClaims 是保留声明名：RFC 7519 §4.1 注册声明 + token_type（#97 双令牌
+// 分型保留名）。kitx/jwt 为它们提供专属签发通道（WithIssuer/WithSubject/
+// WithJTI/WithNotBefore；exp/iat 由 WithTTL/WithNoExpiry 与签发时钟派生；
+// token_type 由 Manager 盖章），业务声明不得占用这些键。
 var reservedClaims = map[string]struct{}{
 	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "nbf": {}, "iat": {}, "jti": {},
+	"token_type": {},
 }
 
 // WithClaim 追加一个业务自定义声明。
 //
-// 注册声明（iss/sub/aud/exp/nbf/iat/jti）不可经 WithClaim 注入，注入时 Sign
-// 直接报错（#71）：Sign 先写注册声明、最后平铺 claims，无条件覆盖会让
-// WithClaim("exp", ...) 顶掉过期时间、WithClaim("iss", externalInput) 篡改
-// 签发者——claim key 若来自配置/请求拼接，就是令牌声明注入面。注册声明请用
+// 保留声明（iss/sub/aud/exp/nbf/iat/jti，及 #97 起的双令牌分型名 token_type）
+// 不可经 WithClaim 注入，注入时 Sign 直接报错（#71）：Sign 先写保留声明、最后
+// 平铺 claims，无条件覆盖会让 WithClaim("exp", ...) 顶掉过期时间、
+// WithClaim("iss", externalInput) 篡改签发者、WithClaim("token_type", ...)
+// 伪造分型——claim key 若来自配置/请求拼接，就是令牌声明注入面。注册声明请用
 // WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与
-// 签发时钟派生。
+// 签发时钟派生，token_type 由 Manager（#97）盖章。
 func WithClaim(key string, val any) SignOption {
 	return func(o *signOptions) { o.claims[key] = val }
 }
@@ -140,10 +146,11 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
-	// 注册声明注入面 fail-closed（#71）：claims 平铺在注册声明写入之后、
-	// 无条件覆盖，注入保留键 = 顶掉 exp/iss/iat 等的既定值。
+	// 保留声明注入面 fail-closed（#71）：claims 平铺在保留声明写入之后、
+	// 无条件覆盖，注入保留键 = 顶掉 exp/iss/iat 等的既定值（#97 起 token_type
+	// 同样保留——伪造分型即分型混淆注入面）。
 	if hits := reservedClaimHits(o.claims); len(hits) > 0 {
-		return nil, fmt.Errorf("%w: WithClaim 不能注入注册声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生", ErrInvalidToken, hits)
+		return nil, fmt.Errorf("%w: WithClaim 不能注入保留声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生，token_type 由 Manager 盖章（#97）", ErrInvalidToken, hits)
 	}
 	now := o.nowFn()
 	payload := map[string]any{}
@@ -166,6 +173,11 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 	for k, v := range o.claims {
 		payload[k] = v
 	}
+	if o.tokenType != "" {
+		// 双令牌分型盖章（#97）：claims 平铺之后无条件写入——业务声明顶不掉，
+		// plain Sign（tokenType 为空）保持不带该声明，payload 向后兼容。
+		payload["token_type"] = o.tokenType
+	}
 	return payload, nil
 }
 
@@ -173,6 +185,7 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 type parseOptions struct {
 	leeway   time.Duration
 	audience []string
+	issuer   string
 }
 
 // ParseOption 是 Parse 的函数选项。
@@ -188,7 +201,22 @@ func WithAudience(expected ...string) ParseOption {
 	return func(o *parseOptions) { o.audience = expected }
 }
 
-// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud）。对称形态
+// WithExpectedIssuer 设置期望签发者（#95）：令牌 iss 必须与之严格相等才通过；
+// 令牌无 iss 或 iss 不匹配 ⇒ 拒绝（fail-closed）。不设置时不校验 iss（向后
+// 兼容）——与 WithAudience 同一口径：签名校验只证明「是我的 key 签的」，不
+// 证明「是约定的签发方签的」；共享密钥（HS256）多签发方场景下，任意持钥方
+// 都能签出 iss 为任意值的令牌，必须显式钉住来源。
+//
+// 名字不是 WithIssuer：签发侧已有 WithIssuer(iss) SignOption（写入 iss），
+// Go 不允许同名重载；解析侧取「期望」语义与 WithAudience（期望受众）对称。
+// 上游 golang-jwt 的校验是严格相等 + iss 必须存在（缺失报
+// ErrTokenRequiredClaimMissing、不匹配报 ErrTokenInvalidIssuer、类型异常报
+// ErrTokenUnverifiable，均可经错误链 errors.Is，#70）。
+func WithExpectedIssuer(expected string) ParseOption {
+	return func(o *parseOptions) { o.issuer = expected }
+}
+
+// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud/iss）。对称形态
 // （HS256 共享密钥）见 ParseSymmetric（#86）——两入口共享校验语义。
 //
 // 错误链保留（#70）：失败时外层哨兵 ErrInvalidToken 与 gojwt 底层 sentinel
@@ -234,6 +262,9 @@ func newParser(o *parseOptions, alg string) *gojwt.Parser {
 	}
 	if len(o.audience) > 0 {
 		parserOpts = append(parserOpts, gojwt.WithAudience(o.audience...))
+	}
+	if o.issuer != "" {
+		parserOpts = append(parserOpts, gojwt.WithIssuer(o.issuer))
 	}
 	return gojwt.NewParser(parserOpts...)
 }

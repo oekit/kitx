@@ -61,8 +61,9 @@ func (s *SymmetricSigner) Sign(opts ...SignOption) (string, error) {
 
 // ParseSymmetric 校验并解析 HS256 令牌——与 Parse（RS256）同构（#86）：同 Claims
 // （注册声明收进 RegisteredClaims、其余进 Extra）、同 ParseOption（WithLeeway/
-// WithAudience）、同错误链（外层哨兵 ErrInvalidToken 与 gojwt 底层 sentinel
-// ErrTokenExpired/ErrTokenSignatureInvalid 等双可 errors.Is，#70）。
+// WithAudience/#66、WithExpectedIssuer/#95）、同错误链（外层哨兵 ErrInvalidToken
+// 与 gojwt 底层 sentinel ErrTokenExpired/ErrTokenSignatureInvalid 等双可
+// errors.Is，#70）。
 //
 // alg 混淆防护（#86）：入口绑定算法——gojwt.WithValidMethods(["HS256"]) 单算法
 // 白名单，RS256 令牌（无论密钥对真假）在本入口一律拒绝；RS256 的 Parse 同理只认
