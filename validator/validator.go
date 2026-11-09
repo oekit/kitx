@@ -11,6 +11,10 @@ type Validator interface {
 	ValidateVar(field any, tag string) error
 
 	// RegisterValidation 注册自定义验证规则。
+	//
+	// fn 为 nil 时返回 ErrNilValidationFunc（#94）；受限 tag（上游保留名/受限
+	// 字符）转为 error 返回而非 panic；规则自身 panic 在校验期就地隔离为
+	// 「该规则校验失败」+ ERROR 日志。
 	RegisterValidation(tag string, fn Func) error
 
 	// RegisterTranslation 注册验证错误的翻译。
