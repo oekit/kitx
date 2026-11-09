@@ -27,9 +27,17 @@ func GenerateKeyPair(bits int) (*KeyPair, error) {
 }
 
 // MarshalKeyPairPEM 把密钥对编为 PEM（私钥 PKCS#1，公钥 PKIX）。
+//
+// 空值检查对称（#96）：Private 与 Public 任一缺失都返回 error——手动构造
+// KeyPair 是合法用法（从已有私钥文件加载、只用一半做测试），缺 Public 时此前
+// 直接 nil 指针 panic（x509.MarshalPKIXPublicKey 解引用 pub.N），与同包
+// NewSymmetric/GenerateKeyPair 的「非法输入返回 error」风格不一致。
 func MarshalKeyPairPEM(kp *KeyPair) (privPEM, pubPEM string, err error) {
 	if kp == nil || kp.Private == nil {
 		return "", "", fmt.Errorf("缺少私钥")
+	}
+	if kp.Public == nil {
+		return "", "", fmt.Errorf("缺少公钥")
 	}
 	privBlock := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(kp.Private)}
 	pubBytes, err := x509.MarshalPKIXPublicKey(kp.Public)
