@@ -3,10 +3,15 @@ package validator
 import (
 	"fmt"
 	"reflect"
+	"runtime/debug"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/oekit/logx"
 )
+
+// log 是本包的懒解析日志器（SDK/基础包规范：Delegating，禁止 Default()）。
+var log = logx.Delegating("kitx/validator")
 
 // PlaygroundValidator 是基于 go-playground/validator 的验证器实现。
 type PlaygroundValidator struct {
@@ -111,10 +116,48 @@ func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag stri
 }
 
 // RegisterValidation 注册自定义验证规则。
-func (pv *PlaygroundValidator) RegisterValidation(tag string, fn Func) error {
+//
+// 门面补三道闸（#94）：
+//   - fn == nil 注册期显式拦下（ErrNilValidationFunc）：门面把 fn 包进永不为
+//     nil 的闭包再传上游，上游的 fn==nil 守卫全部失效——此前 nil 规则注册期
+//     报告成功、第一次用到该 tag 的线上流量才 nil 指针崩溃；
+//   - 上游对受限 tag（required 等保留名或含受限字符）直接 panic，与「返回
+//     error」的签名契约相反——包一层 recover 转成 error，一个拼写错误的保留
+//     tag 不再打死进程；
+//   - 规则自身 panic 在校验期就地隔离（invokeRule）：转为「该规则校验失败」
+//     （false ⇒ 走 ValidationError 400 路径）并记 ERROR 日志带 stack，与
+//     registry/nacosimpl 订阅回调、registry/nacos 配置回调对「消费方回调质量
+//     不可控」的隔离口径一致。
+//
+// ⚠️ 与包级 RegisterValidation 相同：必须在 init 阶段（任何 Struct 校验开始前）
+// 调用——底层注册写内部 map 与校验读并发不安全。
+func (pv *PlaygroundValidator) RegisterValidation(tag string, fn Func) (err error) {
+	if fn == nil {
+		return ErrNilValidationFunc
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			// 上游对受限 tag 直接 panic（validator_instance.go）：转成 error
+			// 返回，兑现 error 契约。tag 未注册，后续校验按未知 tag 处理。
+			err = fmt.Errorf("validator: register rule %q: %v", tag, r)
+		}
+	}()
 	return pv.validate.RegisterValidation(tag, func(fl validator.FieldLevel) bool {
-		return fn(fl.Field().Interface())
+		return invokeRule(tag, fn, fl.Field().Interface())
 	})
+}
+
+// invokeRule 调用规则函数并就地隔离 panic（#94）：规则内部 panic（忘了判 nil、
+// 除零、索引越界）不炸穿请求链，转为该字段校验失败 + ERROR 日志。
+func invokeRule(tag string, fn Func, val any) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("custom validation rule panicked (isolated)",
+				"tag", tag, logx.ErrKey, r, "stack", string(debug.Stack()))
+			ok = false
+		}
+	}()
+	return fn(val)
 }
 
 // RegisterTranslation 注册验证错误的翻译。

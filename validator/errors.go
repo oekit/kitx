@@ -8,6 +8,12 @@ import (
 	bizerrors "github.com/oekit/pkg/errors"
 )
 
+// ErrNilValidationFunc 表示注册自定义验证规则时传入了 nil 函数（#94）。
+// 注册期显式拦下而非推迟到校验期才炸出 nil 指针 panic——上游
+// go-playground/validator 的 fn==nil 守卫会被门面的包装闭包绕过
+// （闭包本身永不为 nil），门面必须自己再挡一道。
+var ErrNilValidationFunc = errors.New("validator: validation func must not be nil")
+
 // ErrTranslationNotSupported 表示当前验证器不支持错误消息翻译。
 // PlaygroundValidator 的错误消息已通过 formatMessage 内置英文提示，
 // 如需自定义消息请扩展 formatMessage 或实现自定义 Validator。
