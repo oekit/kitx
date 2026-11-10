@@ -1,3 +1,14 @@
+## [v0.8.0] — 2026-11-11
+
+- feat(authz): 双 token **状态面**原语（#119，新子包）——撤销黑名单（token 级 / 用户级截断）+ 在线会话注册表（设备/会话维度登记、枚举、强踢）：`TokenHash`（sha256hex）收编键空间唯一产出口（下游 4 服务两份拷贝靠注释对齐、漂移即强踢失效的单点）；`Revoker` 接口化存储（Revoke/Revoked/RevokeUser/RevokedUser）+ `MemRevoker` 内存实现（Redis 等持久实现按同一契约下游落地）；`Session`/`SessionRegistry`（Register 登记 TTL=refresh 剩余寿命、GetByRefreshHash 轮换认领键、ListByUser 管理端枚举、Kick **双 hash 拉黑+删键的原子认领**（三态返回：true=完整下线 / false=nil=不在（幂等强踢/竞态败方）/ false+err=拉黑失败保留登记可重试）、KickUser 强踢全会话）+ `MemRegistry` 内存实现；与 kitx/jwt 校验面经 `auth.IsRevoked` / `auth.Flow.ParseAccess` 组合消费（pair.go 留白的状态面收编）
+- feat(auth): 认证流**编排**原语（#120，新子包）——`Flow.IssuePair` 签发尾段（签发+会话登记一次落地：登记失败回收刚签双 token，不放行无主令牌）、`Flow.RotateRefresh` refresh 轮换+防重放（**先原子认领旧会话后签发新对**——并发轮换同一 refresh 恰一胜一负（屏障测试钉死），旧 refresh 二次使用恒 `ErrReplayed`）、`Flow.Logout` 登出双 token 撤销（会话下线+呈现令牌拉黑，幂等可重）、`Flow.ParseAccess` 资源侧消费面、`UserRepo` 仓储适配面（GetByID 错误分型 401/500、TouchLogin 尽力而为——3 服务逐字同源后漂移的安全不变式收单点）；错误分型单点：`ErrUnauthorized`（BizError 401，middleware.Fail 自动映射）/`ErrReplayed`（重放信号，双判 ErrUnauthorized）/`ErrUserNotFound`（契约哨兵，归 401 不泄露存在性），存储故障原样上抛归 500（不放行、不放大成全站 401）
+- feat(pwd): 密码策略与改密陈旧判定原语（#121，新子包，纯 Go 零依赖）——`Policy.Check`（最小/最大长度 rune 口径、复杂度四类、常见弱口令拒绝面：内嵌表 + 轻量 leet 归一 + 弱核心子串 + 结构性弱模式（全同/连续/键盘行））、`CheckMinLength`（msgFormat 文案模板，issue 建议形态）、`HistoryCheck` 历史防复用（**fail-closed：历史查询/比对失败 ≠ 放行**；哈希比对器注入，不绑 bcrypt——零依赖边界）、`ApplyExpiryOnLogin` 登录期过期轮换判定、`TokenStaleBefore` 秒截断陈旧比较（iat 与改密时间同秒不判陈旧——亚秒边界不放大成全站踢下线）；策略违规=`Violation`（Unwrap 为 BizError 400 自动映射），策略配置 bug=普通 error 归 500（#115 同口径）
+- 三件套咬合（#119/#120/#121）：#120 编排消费 #119 状态面；#121 的改密吊销钩子 `auth.RevokeUser`（包级+Flow 方法）落到 #119 用户级撤销黑名单+全会话强踢（errors.Join 聚合，部分落地不回滚）；陈旧判定口径单点 `pwd.TokenStaleBefore`（MemRevoker.RevokedUser 复用同一份实现，两处比较不各写）
+- 现代特性：errors.Join（Logout/RevokeUser/Kick 多路错误聚合）、slices.Clone（选项入参/角色拷贝）+ slices.SortFunc（会话枚举稳定排序）、min（NewFlow TTL 判断）、sync.OnceValue（弱口令索引懒建，OnceFunc 家族）；max 无贴合处未强用（time.Time 非 cmp.Ordered，用户级截断点单调取较大者用显式比较）
+- 版本号取 v0.8.0：authz/auth/pwd 三个新子包整面是新公开 API，0.x 阶段 minor 承载加法 API
+
+关联问题单：kitx#119、kitx#120、kitx#121。
+
 ## [v0.7.0] — 2026-11-11
 
 - feat(jwt): 签发侧新增 `WithAudienceClaims`——aud 的签发出口（#117）：signPayload 写入 aud（单受众 string / 多受众 []string 双形态，与 claimsFromMap 解析面对称），「签发→解析」的 aud 闭环打通（与 WithAudience fail-closed（#66）对接），多受众部署不再被迫手搓 payload；`Manager.Refresh` 继承面同步带上 aud（轮换产物仍可过 WithAudience 校验；nbf 不随轮换继承——生效窗口随新 exp/iat 重开）；WithClaim 保留声明报错指引补 WithAudienceClaims 出口（#71 注入面防护不动）；选项入参 slices.Clone 拷贝，空串受众 fail-fast panic（#65 同款纪律）
