@@ -3,6 +3,7 @@ package validator
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	bizerrors "github.com/oekit/pkg/errors"
@@ -47,9 +48,11 @@ func (e *ValidationError) Unwrap() error {
 	return bizerrors.NewBizErrorWithStatus(400, 400, e.Error())
 }
 
-// Errors 返回所有字段错误。
+// Errors 返回所有字段错误（副本，#116）：返回值与内部存储不共享底层数组——
+// 调用方排序/改写返回值不得影响错误值自身的 Error()/Map()/String()。错误值在
+// Go 里按惯例不可变（core#80 同款快照纪律：已发布的快照不可被事后改写）。
 func (e *ValidationError) Errors() []FieldError {
-	return e.errors
+	return slices.Clone(e.errors)
 }
 
 // Map 返回 field→message 映射，适用于 JSON 响应。
@@ -79,10 +82,13 @@ func (e *ValidationError) String() string {
 	return sb.String()
 }
 
-// NewFieldValidationError 创建包含指定字段错误的验证错误。
-// 供 handler/validatorh 等外部包构造 ValidationError。
-func NewFieldValidationError(errors []FieldError) *ValidationError {
-	return &ValidationError{errors: errors}
+// NewFieldValidationError 创建包含指定字段错误的验证错误（构造期拷贝入参，
+// #116）。供 handler/validatorh 等外部包构造 ValidationError。入参与内部存储
+// 不共享底层数组（slices.Clone）——调用方构造后复用底层数组做日志增强/翻译
+// 不得让已返回给调用方的错误值内容事后漂移（构造与 Errors() 读取双向别名在
+// 此切断，core#80 同构）。
+func NewFieldValidationError(fieldErrs []FieldError) *ValidationError {
+	return &ValidationError{errors: slices.Clone(fieldErrs)}
 }
 
 // IsValidationError 检查错误是否为 ValidationError 类型。

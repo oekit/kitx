@@ -144,3 +144,47 @@ func TestNewFieldValidationError(t *testing.T) {
 		t.Errorf("expected 1 error, got %d", ve.Len())
 	}
 }
+
+// #116：构造期拷贝入参——handler/validatorh 构造后复用底层数组做日志增强/
+// 翻译是常见形态，调用方事后改写不得让已发布的错误值内容漂移（错误值按惯例
+// 不可变，core#80 同构：已发布的快照不可被发布方事后改写）。
+// 修复前断言失败：Error()/Map() 跟着入参改写变成 MUTATED-BY-CALLER。
+func TestNewFieldValidationError_CopiesInput(t *testing.T) {
+	fieldErrs := []FieldError{{Field: "name", Tag: "required", Message: "name is required"}}
+	ve := NewFieldValidationError(fieldErrs)
+	fieldErrs[0].Message = "MUTATED-BY-CALLER"
+	if got := ve.Error(); got != "name is required" {
+		t.Fatalf("Error() = %q, 入参事后改写不得影响错误值（#116 修复前为 MUTATED-BY-CALLER）", got)
+	}
+	if got := ve.Map()["name"]; got != "name is required" {
+		t.Fatalf("Map()[name] = %q, want 不受入参改写影响", got)
+	}
+	if got := ve.Errors()[0].Message; got != "name is required" {
+		t.Fatalf("Errors()[0].Message = %q, want 不受入参改写影响", got)
+	}
+}
+
+// #116：Errors() 返回副本——审计组件拿 Errors() 后排序/改写 Message（常见形态）
+// 不得污染 Error()/Map()/String()；跨 goroutine 异步上报时双向别名还会构成数据
+// 竞争。修复前断言失败：Map() 跟着返回值改写变成 HACKED。
+func TestValidationError_ErrorsReturnsCopy(t *testing.T) {
+	ve := NewFieldValidationError([]FieldError{{Field: "name", Tag: "required", Message: "name is required"}})
+	got := ve.Errors()
+	got[0].Message = "HACKED"
+	if got := ve.Error(); got != "name is required" {
+		t.Fatalf("Error() = %q, Errors() 改写不得污染错误值（#116 修复前为 HACKED）", got)
+	}
+	if m := ve.Map()["name"]; m != "name is required" {
+		t.Fatalf("Map()[name] = %q, Errors() 改写不得污染 Map()", m)
+	}
+	if s := ve.String(); s != "validation failed: name (required)" {
+		t.Fatalf("String() = %q, want 不受 Errors() 改写影响", s)
+	}
+	// 返回值是独立副本：长度/元素与内部一致，但底层数组不共享。
+	if len(got) != 1 || got[0].Field != "name" {
+		t.Fatalf("Errors() = %+v, want 副本内容与内部一致", got)
+	}
+	if &got[0] == &ve.errors[0] {
+		t.Fatal("Errors() 必须返回副本（底层数组不得与内部共享）")
+	}
+}
