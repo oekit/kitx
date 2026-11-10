@@ -106,16 +106,20 @@ func NewManagerHS256(secret []byte) (*Manager, error) {
 // 永不过期令牌是最危险的缺省，与 WithTTL(0) panic（#65）同一纪律，此处以
 // error 而非 panic 表达：IssuePair 有 error 出口）。
 //
-// opts 透传既有 SignOption（如 WithIssuer 钉签发者、WithClaim 带会话数据、
-// WithNow/WithIssuedAt 注入签发时钟），两令牌共享同一份选项；其中 subject 与
-// ttl 由位置参数拍板（用户同名选项 last-wins 覆盖之），token_type 由 Manager
-// 盖章（WithClaim("token_type", ...) 直接被 #71 注入面防护拒绝）。
+// opts 透传既有 SignOption（如 WithIssuer 钉签发者、WithAudienceClaims 钉受众、
+// WithClaim 带会话数据、WithNow/WithIssuedAt 注入签发时钟），两令牌共享同一份
+// 选项；其中 subject 与 ttl 由位置参数拍板（用户同名选项 last-wins 覆盖之），
+// token_type 由 Manager 盖章（WithClaim("token_type", ...) 直接被 #71 注入面
+// 防护拒绝）。
 //
 // 返回的 access/refresh 都是普通 JWT 字符串：直接用 Parse/ParseSymmetric 也能
 // 解（token_type 落在 Extra），但按分型消费请走 ParseTyped——分型校验正是本
 // 原语的存在意义。
 func (m *Manager) IssuePair(subject string, ttlAccess, ttlRefresh time.Duration, opts ...SignOption) (access, refresh string, err error) {
-	if ttlAccess <= 0 || ttlRefresh <= 0 {
+	// min 内建（Go 1.21+）与「任一非正即拒」等价：ttl 必须为正——配置零值
+	// 透传签出永不过期令牌是最危险的缺省（#65 同款纪律，IssuePair 以 error
+	// 表达）。
+	if min(ttlAccess, ttlRefresh) <= 0 {
 		return "", "", fmt.Errorf("IssuePair 的 ttl 必须为正（access=%v refresh=%v）——配置零值透传签出永不过期令牌是最危险的缺省（#65 同款纪律，IssuePair 以 error 表达）", ttlAccess, ttlRefresh)
 	}
 	access, err = m.issueTyped(TokenAccess, subject, ttlAccess, opts)
@@ -160,28 +164,35 @@ func (m *Manager) ParseTyped(kind TokenKind, token string, opts ...ParseOption) 
 
 // Refresh 用合法 refresh 令牌轮换出新令牌对（refresh token rotation）：分型
 // 校验旧令牌（token_type=refresh，ParseOption 经 opts 透传）→ 以旧令牌的
-// 身份与会话上下文（sub/iss/业务声明 Extra）签发新对（分型重新盖章、jti 重新
-// 生成、exp/iat 重新计算）→ 成功后以旧 refresh 的 Claims 调用 onRotate 轮换
-// 钩子（可为 nil；同步调用，旧令牌的 Claims.ID 即待吊销的 jti）。
+// 身份与会话上下文（sub/iss/aud/业务声明 Extra）签发新对（分型重新盖章、jti
+// 重新生成、exp/iat 重新计算）→ 成功后以旧 refresh 的 Claims 调用 onRotate
+// 轮换钩子（可为 nil；同步调用，旧令牌的 Claims.ID 即待吊销的 jti）。
 //
 // 钩子只负责「旧令牌失效化」的落地（撤销黑名单/存储仍在平台层），库层保证
 // 时序：新对签发成功之后才触发。轮换语义本身是无状态的——旧 refresh 的作废
 // 依赖平台层在钩子里记录 jti 并在后续 ParseTyped 通路外拒绝（库不维护黑名单，
 // #97：有状态撤销是平台层的薄配置职责）。
 func (m *Manager) Refresh(refreshToken string, ttlAccess, ttlRefresh time.Duration, onRotate func(old *Claims), opts ...ParseOption) (access, refresh string, err error) {
-	if ttlAccess <= 0 || ttlRefresh <= 0 {
+	// min 内建（Go 1.21+）与「任一非正即拒」等价（IssuePair 同口径，#65 纪律）。
+	if min(ttlAccess, ttlRefresh) <= 0 {
 		return "", "", fmt.Errorf("Refresh 的 ttl 必须为正（access=%v refresh=%v）——配置零值透传签出永不过期令牌是最危险的缺省（#65 同款纪律，Refresh 以 error 表达）", ttlAccess, ttlRefresh)
 	}
 	old, err := m.ParseTyped(TokenRefresh, refreshToken, opts...)
 	if err != nil {
 		return "", "", err
 	}
-	// 继承会话上下文：iss/sub/业务声明。token_type 分型由 issueTyped 重新盖章，
-	// 不随 Extra 继承。jti 一律重新生成——轮换不得复用旧 jti（钩子正是按旧
-	// jti 吊销，复用等于吊销新令牌）。
-	base := make([]SignOption, 0, len(old.Extra)+2)
+	// 继承会话上下文：iss/sub/aud/业务声明。token_type 分型由 issueTyped 重新
+	// 盖章，不随 Extra 继承。jti 一律重新生成——轮换不得复用旧 jti（钩子正是
+	// 按旧 jti 吊销，复用等于吊销新令牌）。aud 随身份走（#117）：多受众部署的
+	// WithAudience（#66）fail-closed 校验会把丢 aud 的新令牌全部拒掉，轮换即
+	// 断流。nbf 不随轮换继承——exp/iat 既已按轮换时刻重新计算，生效窗口整体
+	// 重开，新令牌自签发时刻起生效。
+	base := make([]SignOption, 0, len(old.Extra)+3)
 	if old.Issuer != "" {
 		base = append(base, WithIssuer(old.Issuer))
+	}
+	if len(old.Audience) > 0 {
+		base = append(base, WithAudienceClaims(old.Audience...))
 	}
 	for k, v := range old.Extra {
 		if k == TokenTypeClaim {

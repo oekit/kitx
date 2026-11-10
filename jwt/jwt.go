@@ -5,7 +5,9 @@
 //
 // 两形态共享同一套 SignOption/ParseOption/Claims 与校验语义；每个入口固定自己
 // 的算法（RS256 入口只认 RS256、HS256 入口只认 HS256），密钥形态绑定算法关死
-// alg 混淆。解析侧校验入口：WithAudience（#66）与 WithExpectedIssuer（#95）。
+// alg 混淆。解析侧校验入口：WithAudience（#66）与 WithExpectedIssuer（#95）；
+// 签发侧 aud 出口：WithAudienceClaims（#117）——与 WithAudience 闭环，库签发的
+// 令牌可带 aud，多受众部署不再被迫手搓 payload。
 //
 // 硬契约（与既有消费方互通，不可改）：
 //   - RS256 形态 alg 恰为 RS256；HS256 形态 alg 恰为 HS256
@@ -17,6 +19,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -38,6 +41,7 @@ type signOptions struct {
 	issuer    string
 	subject   string
 	jti       string
+	audience  []string
 	ttl       time.Duration
 	noExpiry  bool
 	notBefore *time.Time
@@ -54,6 +58,30 @@ func WithIssuer(iss string) SignOption { return func(o *signOptions) { o.issuer 
 
 // WithSubject 设置 sub。
 func WithSubject(sub string) SignOption { return func(o *signOptions) { o.subject = sub } }
+
+// WithAudienceClaims 设置 aud（受众）（#117）：单受众写 string 形态、多受众写
+// []string 形态，与 claimsFromMap 的解析面（string/数组双收）对称（RFC 7519
+// §4.1.3 双形态）。不设置时令牌不带 aud（向后兼容）；零参与不设置同效（显式
+// 回退默认值）；受众含空串直接 panic——空受众是配置零值透传的最常见形态，签出
+// 的令牌在 WithAudience（#66）fail-closed 校验下永不匹配，静默接受等于批量产出
+// 必被拒的令牌（WithTTL(0) panic（#65）同款纪律）。重复调用 last-wins（与
+// WithIssuer 等注册声明选项同口径）。入参即刻 slices.Clone 拷贝，调用方事后
+// 改写原切片不影响签发结果。
+//
+// 名字不是 WithAudience：解析侧已有 WithAudience(...string) ParseOption（校验
+// 期望受众），Go 不允许同名重载，此处取「写入 aud 声明」语义与之分型（与
+// WithExpectedIssuer（#95）同款命名分型纪律）。aud 是保留声明（reservedClaims），
+// 不可经 WithClaim 注入（#71）——本选项是 aud 的唯一签发出口。
+func WithAudienceClaims(aud ...string) SignOption {
+	return func(o *signOptions) {
+		for _, a := range aud {
+			if a == "" {
+				panic("jwt: WithAudienceClaims 的受众不能是空串——空受众是配置零值透传的最常见形态，签出的令牌在 WithAudience（#66）fail-closed 校验下永不匹配（#117）")
+			}
+		}
+		o.audience = slices.Clone(aud)
+	}
+}
 
 // WithJTI 设置 jti（令牌 ID）。
 func WithJTI(jti string) SignOption { return func(o *signOptions) { o.jti = jti } }
@@ -103,8 +131,8 @@ func WithIssuedAt(t time.Time) SignOption {
 
 // reservedClaims 是保留声明名：RFC 7519 §4.1 注册声明 + token_type（#97 双令牌
 // 分型保留名）。kitx/jwt 为它们提供专属签发通道（WithIssuer/WithSubject/
-// WithJTI/WithNotBefore；exp/iat 由 WithTTL/WithNoExpiry 与签发时钟派生；
-// token_type 由 Manager 盖章），业务声明不得占用这些键。
+// WithAudienceClaims/WithJTI/WithNotBefore；exp/iat 由 WithTTL/WithNoExpiry 与
+// 签发时钟派生；token_type 由 Manager 盖章），业务声明不得占用这些键。
 var reservedClaims = map[string]struct{}{
 	"iss": {}, "sub": {}, "aud": {}, "exp": {}, "nbf": {}, "iat": {}, "jti": {},
 	"token_type": {},
@@ -117,8 +145,8 @@ var reservedClaims = map[string]struct{}{
 // 平铺 claims，无条件覆盖会让 WithClaim("exp", ...) 顶掉过期时间、
 // WithClaim("iss", externalInput) 篡改签发者、WithClaim("token_type", ...)
 // 伪造分型——claim key 若来自配置/请求拼接，就是令牌声明注入面。注册声明请用
-// WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与
-// 签发时钟派生，token_type 由 Manager（#97）盖章。
+// WithIssuer/WithSubject/WithAudienceClaims/WithJTI/WithNotBefore 设置，
+// exp/iat 由 WithTTL 与签发时钟派生，token_type 由 Manager（#97）盖章。
 func WithClaim(key string, val any) SignOption {
 	return func(o *signOptions) { o.claims[key] = val }
 }
@@ -150,7 +178,7 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 	// 无条件覆盖，注入保留键 = 顶掉 exp/iss/iat 等的既定值（#97 起 token_type
 	// 同样保留——伪造分型即分型混淆注入面）。
 	if hits := reservedClaimHits(o.claims); len(hits) > 0 {
-		return nil, fmt.Errorf("%w: WithClaim 不能注入保留声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生，token_type 由 Manager 盖章（#97）", ErrInvalidToken, hits)
+		return nil, fmt.Errorf("%w: WithClaim 不能注入保留声明 %v（#71）——这是令牌声明注入面；注册声明请用 WithIssuer/WithSubject/WithAudienceClaims/WithJTI/WithNotBefore 设置，exp/iat 由 WithTTL 与签发时钟派生，token_type 由 Manager 盖章（#97）", ErrInvalidToken, hits)
 	}
 	now := o.nowFn()
 	payload := map[string]any{}
@@ -159,6 +187,17 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 	}
 	if o.subject != "" {
 		payload["sub"] = o.subject
+	}
+	// aud 双形态（#117）：单受众 string、多受众 []string——与 claimsFromMap
+	// 的解析面对称（RFC 7519 §4.1.3 两形态都合法）。aud 的唯一写入口是
+	// WithAudienceClaims；WithClaim("aud") 仍被上面的保留声明防护拒绝（#71
+	// 注入面不动）。
+	switch len(o.audience) {
+	case 0:
+	case 1:
+		payload["aud"] = o.audience[0]
+	default:
+		payload["aud"] = o.audience
 	}
 	if o.jti != "" {
 		payload["jti"] = o.jti
