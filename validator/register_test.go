@@ -102,3 +102,69 @@ func TestRegisterValidation_NormalPathUnchanged(t *testing.T) {
 		t.Fatalf("ValidateVar() = %v, want ValidationError", err)
 	}
 }
+
+// #115：上游内置校验器对「tag 与字段 Kind 不匹配」的非法组合（bool/struct 字段
+// 挂 min 等）在校验期直接 panic（探针实证 "Bad field type bool" / "Bad field
+// type <struct>"）——#94 三道闸（nil fn 注册拦截、注册期 panic 转 error、自定义
+// 规则 invokeRule 隔离）一条都不覆盖这条路径，panic 原样穿透 Validate，与门面
+// 「panic 不出网」承诺相反（tag 误写编译期无症状，第一次请求校验即炸穿请求链）。
+// 修复前断言失败：panic 逃逸到调用方（测试自身兜 recover 把「逃逸」转成断言
+// 失败，而不是炸掉整个测试进程）。
+func TestValidate_EnginePanicTurnedToError(t *testing.T) {
+	type badTagInner struct{ N int }
+	pv := New()
+	for name, obj := range map[string]any{
+		"bool 挂 min": &struct {
+			B bool `json:"b" validate:"min=1"`
+		}{B: true},
+		"struct 挂 min": &struct {
+			S badTagInner `json:"s" validate:"min=1"`
+		}{S: badTagInner{N: 5}},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("[%s] Validate() panic 穿透门面: %v（#115 闸缺失）", name, r)
+				}
+			}()
+			err := pv.Validate(obj)
+			if err == nil {
+				t.Fatalf("[%s] tag 与字段 Kind 不匹配必须转为 error", name)
+			}
+			if IsValidationError(err) {
+				t.Fatalf("[%s] tag 误用是服务端结构体定义 bug，不得归为 ValidationError 400，got %v", name, err)
+			}
+			if !strings.Contains(err.Error(), "panicked") {
+				t.Fatalf("[%s] error = %v, want 点明校验期 panic", name, err)
+			}
+		}()
+	}
+}
+
+// #115：ValidateVar/ValidateVarNamed 同口径（Var 路径直通同一上游引擎）；tag
+// 参数自身非法（min=abc 的参数解析 panic）一并被闸住。
+func TestValidateVar_EnginePanicTurnedToError(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("ValidateVar() panic 穿透门面: %v（#115 闸缺失）", r)
+		}
+	}()
+	err := ValidateVar(true, "min=1")
+	if err == nil {
+		t.Fatal("ValidateVar(true, \"min=1\") 必须转为 error")
+	}
+	if IsValidationError(err) {
+		t.Fatalf("tag 误用不得归为 ValidationError 400，got %v", err)
+	}
+	if !strings.Contains(err.Error(), "min=1") {
+		t.Fatalf("error = %v, want 带上触发 tag 便于排障", err)
+	}
+	// ValidateVarNamed 走同一闸；tag 参数非法（min=abc）是另一 panic 形态。
+	err = ValidateVarNamed(3, "payload", "min=abc")
+	if err == nil || IsValidationError(err) {
+		t.Fatalf("ValidateVarNamed(3, \"min=abc\") = %v, want 非 ValidationError 的 error", err)
+	}
+	if !strings.Contains(err.Error(), "min=abc") {
+		t.Fatalf("error = %v, want 带上触发 tag", err)
+	}
+}

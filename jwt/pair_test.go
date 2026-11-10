@@ -276,6 +276,41 @@ func TestRefreshRotation(t *testing.T) {
 	}
 }
 
+// #117：Refresh 继承面带上 aud——多受众部署的轮换闭环：新令牌对必须仍带 aud，
+// 否则 WithAudience（#66 fail-closed）把轮换产物全部拒掉（轮换即断流，#117
+// 附带面）。修复前签不出带 aud 的令牌（#117 缺口本体），此闭环无从走通。
+func TestRefreshInheritsAudience(t *testing.T) {
+	m := newTestRS256Manager(t)
+	_, refresh1, err := m.IssuePair("user-1", time.Minute, time.Hour,
+		WithIssuer("self"), WithAudienceClaims("svc-a", "svc-b"))
+	if err != nil {
+		t.Fatalf("IssuePair() error = %v", err)
+	}
+	access2, refresh2, err := m.Refresh(refresh1, time.Minute, time.Hour, nil)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	// 新对两枚令牌都带 aud，且可过 WithAudience fail-closed 校验（any-of）。
+	ac2, err := m.ParseTyped(TokenAccess, access2, WithAudience("svc-b"))
+	if err != nil {
+		t.Fatalf("ParseTyped(access2, WithAudience(svc-b)) = %v, want nil（轮换不得丢 aud）", err)
+	}
+	if len(ac2.Audience) != 2 || ac2.Audience[0] != "svc-a" || ac2.Audience[1] != "svc-b" {
+		t.Fatalf("access2 Audience = %v, want [svc-a svc-b]（继承不丢不改）", ac2.Audience)
+	}
+	rc2, err := m.ParseTyped(TokenRefresh, refresh2, WithAudience("svc-a"))
+	if err != nil {
+		t.Fatalf("ParseTyped(refresh2, WithAudience(svc-a)) = %v, want nil", err)
+	}
+	if len(rc2.Audience) != 2 {
+		t.Fatalf("refresh2 Audience = %v, want [svc-a svc-b]", rc2.Audience)
+	}
+	// 身份照常继承（aud 继承不动既有面）。
+	if ac2.Subject != "user-1" || ac2.Issuer != "self" {
+		t.Fatalf("access2 = {iss:%q sub:%q}, want {self user-1}", ac2.Issuer, ac2.Subject)
+	}
+}
+
 // Refresh 拒绝过期 refresh；ParseOption（WithLeeway）经 Refresh 透传生效；
 // ttl 位置参数校验同 IssuePair。
 func TestRefreshValidation(t *testing.T) {

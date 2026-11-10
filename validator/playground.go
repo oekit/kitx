@@ -38,8 +38,22 @@ func New() *PlaygroundValidator {
 }
 
 // Validate 验证结构体。
-func (pv *PlaygroundValidator) Validate(obj any) error {
-	err := pv.validate.Struct(obj)
+//
+// 门面闸（#115）：上游内置校验器对「tag 与字段 Kind 不匹配」的非法组合在校验期
+// 直接 panic（如 bool/struct 字段挂 min/max/len，探针实证 "Bad field type
+// bool"）——#94 的三道闸（nil fn 注册拦截、注册期 panic 转 error、自定义规则
+// invokeRule 隔离）一条都不覆盖这条路径。就地 recover 转 error + ERROR 日志
+// （带 stack），兑现 Validator 接口「返回 error、panic 不出网」的契约；tag 误用
+// 是服务端结构体定义 bug，按普通 error 上抛（handler 层归 500），不走
+// ValidationError 400——把服务端 bug 归成客户端 400 会让排障指错方向（与
+// RegisterValidation 注册期 panic 转 error 同口径）。
+func (pv *PlaygroundValidator) Validate(obj any) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = enginePanicError(fmt.Sprintf("Validate(%T)", obj), r)
+		}
+	}()
+	err = pv.validate.Struct(obj)
 	if err == nil {
 		return nil
 	}
@@ -86,9 +100,15 @@ func (pv *PlaygroundValidator) ValidateVarNamed(field any, fieldName string, tag
 // validateVar 执行单变量校验并组装结构化错误。
 //
 // fieldName 只在底层给不出字段名（Var 路径）时兜底；结构体校验路径
-// （Validate）始终用真实的结构体字段名。
-func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag string) error {
-	err := pv.validate.Var(field, tag)
+// （Validate）始终用真实的结构体字段名。门面闸（#115）与 Validate 同口径：
+// 上游引擎 panic 就地转 error，ValidateVar/ValidateVarNamed 共用本路径。
+func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = enginePanicError(fmt.Sprintf("ValidateVar(%T, tag=%q)", field, tag), r)
+		}
+	}()
+	err = pv.validate.Var(field, tag)
 	if err == nil {
 		return nil
 	}
@@ -158,6 +178,15 @@ func invokeRule(tag string, fn Func, val any) (ok bool) {
 		}
 	}()
 	return fn(val)
+}
+
+// enginePanicError 校验路径 panic 的统一转译（#115，与 invokeRule 同款可观测
+// 形态）：记 ERROR 日志（带 stack）并转成携带入口定位的 error——上游 panic 值
+// （如 "Bad field type bool"）随消息带出，排障一眼可见是 tag 误用而非请求问题。
+func enginePanicError(op string, r any) error {
+	log.Error("validation engine panicked (isolated)",
+		"op", op, logx.ErrKey, r, "stack", string(debug.Stack()))
+	return fmt.Errorf("validator: %s validation panicked (tag/field-kind mismatch is the usual cause, e.g. min/max/len on bool or struct fields): %v", op, r)
 }
 
 // RegisterTranslation 注册验证错误的翻译。

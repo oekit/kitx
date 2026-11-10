@@ -433,6 +433,103 @@ func TestParseWithAudience(t *testing.T) {
 	}
 }
 
+// #117：签发→解析 aud 闭环——WithAudienceClaims 签出带 aud 的令牌，与解析侧
+// WithAudience（#66 fail-closed）对接；单受众写 string 形态、多受众写 []string
+// 形态（与 claimsFromMap 对称）。修复前此闭环在本包走不通：WithClaim("aud")
+// 被 #71 拒、无签发出口，WithAudience 的目标场景只能出自外部签名者（本用例
+// 即 jwt_test 一直缺失的「签发→解析」aud 闭环证据）。
+func TestSignWithAudienceClaimsRoundTrip(t *testing.T) {
+	kp := newTestKeyPair(t)
+	single, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithAudienceClaims("svc-a"))
+	if err != nil {
+		t.Fatalf("Sign() single error = %v", err)
+	}
+	if got := decodeSegment(t, single, 1)["aud"]; got != "svc-a" {
+		t.Fatalf("单受众必须写 string 形态, payload[aud] = %v", got)
+	}
+	// 签发→解析闭环：WithAudience 命中通过、不匹配拒绝（#66 fail-closed 不变）。
+	if _, err := Parse(single, kp.Public, WithAudience("svc-a")); err != nil {
+		t.Fatalf("Parse(WithAudience(svc-a)) = %v, want nil（闭环）", err)
+	}
+	if _, err := Parse(single, kp.Public, WithAudience("svc-b")); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse(WithAudience(svc-b)) 不匹配受众必须拒绝, got %v", err)
+	}
+	got, err := Parse(single, kp.Public, WithAudience("svc-a"))
+	if err != nil {
+		t.Fatalf("Parse() collect error = %v", err)
+	}
+	if len(got.Audience) != 1 || got.Audience[0] != "svc-a" {
+		t.Fatalf("Audience = %v, want [svc-a]", got.Audience)
+	}
+
+	multi, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithAudienceClaims("svc-a", "svc-b"))
+	if err != nil {
+		t.Fatalf("Sign() multi error = %v", err)
+	}
+	arr, ok := decodeSegment(t, multi, 1)["aud"].([]any)
+	if !ok || len(arr) != 2 {
+		t.Fatalf("多受众必须写 []string 形态, payload[aud] = %v", decodeSegment(t, multi, 1)["aud"])
+	}
+	if _, err := Parse(multi, kp.Public, WithAudience("svc-b")); err != nil {
+		t.Fatalf("Parse(WithAudience(svc-b)) 数组形态 any-of = %v, want nil", err)
+	}
+	gotMulti, err := Parse(multi, kp.Public, WithAudience("svc-a"))
+	if err != nil {
+		t.Fatalf("Parse() multi collect error = %v", err)
+	}
+	if len(gotMulti.Audience) != 2 {
+		t.Fatalf("Audience = %v, want [svc-a svc-b]", gotMulti.Audience)
+	}
+
+	// 零参与不设置同效（显式回退默认值）：令牌不带 aud，向后兼容面不变。
+	none, err := Sign(kp, WithSubject("u"), WithTTL(time.Hour), WithAudienceClaims())
+	if err != nil {
+		t.Fatalf("Sign() zero-arg error = %v", err)
+	}
+	if _, ok := decodeSegment(t, none, 1)["aud"]; ok {
+		t.Fatalf("零参与必须不写 aud, payload = %v", decodeSegment(t, none, 1))
+	}
+	if _, err := Parse(none, kp.Public); err != nil {
+		t.Fatalf("Parse() zero-arg token = %v, want nil", err)
+	}
+
+	// HS256 形态共享 signPayload，同一签发语义。
+	signer := newTestSigner(t)
+	hsToken, err := signer.Sign(WithSubject("u"), WithTTL(time.Hour), WithAudienceClaims("svc-a", "svc-b"))
+	if err != nil {
+		t.Fatalf("SymmetricSigner.Sign() error = %v", err)
+	}
+	if _, err := ParseSymmetric(hsToken, testHS256Secret(t), WithAudience("svc-b")); err != nil {
+		t.Fatalf("ParseSymmetric(WithAudience(svc-b)) = %v, want nil（HS256 同语义）", err)
+	}
+}
+
+// #117：空串受众 fail-fast——空受众是配置零值透传的最常见形态，签出的令牌在
+// WithAudience（#66）fail-closed 校验下永不匹配（WithTTL(0) panic（#65）同款
+// 纪律：非法入参启动即暴露好过静默产出废令牌）。
+func TestWithAudienceClaimsEmptyStringPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("WithAudienceClaims(\"\") must panic")
+		}
+	}()
+	kp := newTestKeyPair(t)
+	_, _ = Sign(kp, WithSubject("u"), WithAudienceClaims("svc-a", ""))
+}
+
+// #117：#71 保留声明报错指引补上 aud 的签发出口——此前指引只列
+// WithIssuer/WithSubject/WithJTI/WithNotBefore，aud 只进不出。
+func TestSignReservedClaimErrorPointsToAudienceExit(t *testing.T) {
+	kp := newTestKeyPair(t)
+	_, err := Sign(kp, WithClaim("aud", "injected"))
+	if err == nil {
+		t.Fatal("WithClaim(aud) 必须被 #71 拒绝")
+	}
+	if !strings.Contains(err.Error(), "WithAudienceClaims") {
+		t.Fatalf("error = %v, 必须指引到 aud 的签发出口 WithAudienceClaims（#117）", err)
+	}
+}
+
 // #67：类型异常的注册声明 fail-closed——iss/sub/jti 存在但非字符串（如 Java 侧
 // Long 序列化出的数值 sub、数组 iss）时 Parse 拒绝并带声明名与实际类型，不再
 // 静默归零成空 Subject 放行（RFC 7519 §4.1.1/§4.1.2 要求 iss/sub MUST be a String）。
