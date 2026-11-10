@@ -1,3 +1,7 @@
+## [v0.6.1] — 2026-11-10
+
+- - build: 依赖地板对齐（floor sync，无代码变更）
+
 ## [v0.6.0] — 2026-11-10
 
 - - fix(validator): RegisterValidation nil 规则注册期返回 ErrNilValidationFunc、受限 tag panic 转校验失败、规则 panic 就地隔离（#94）
