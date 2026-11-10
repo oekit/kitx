@@ -1,3 +1,14 @@
+## [v0.7.0] — 2026-11-11
+
+- feat(jwt): 签发侧新增 `WithAudienceClaims`——aud 的签发出口（#117）：signPayload 写入 aud（单受众 string / 多受众 []string 双形态，与 claimsFromMap 解析面对称），「签发→解析」的 aud 闭环打通（与 WithAudience fail-closed（#66）对接），多受众部署不再被迫手搓 payload；`Manager.Refresh` 继承面同步带上 aud（轮换产物仍可过 WithAudience 校验；nbf 不随轮换继承——生效窗口随新 exp/iat 重开）；WithClaim 保留声明报错指引补 WithAudienceClaims 出口（#71 注入面防护不动）；选项入参 slices.Clone 拷贝，空串受众 fail-fast panic（#65 同款纪律）
+- fix(validator): `ValidationError` 的 errors 切片双向共享切断（#116，core#80 同构换仓复发）——`NewFieldValidationError` 构造期 slices.Clone 拷贝入参、`Errors()` 返回副本，错误值不可变契约补齐：调用方事后改写入参/返回值不再污染 Error()/Map()/String()，跨 goroutine 异步上报的数据竞争面一并关闭
+- fix(validator): Validate/ValidateVar(VarNamed) 上游引擎 panic 就地转 error + ERROR 日志（#115）——bool/struct 字段挂 min/max/len 等「tag 与字段 Kind 不匹配」形态不再炸穿请求链，#94 三道闸补上校验路径闸（「panic 不出网」承诺全覆盖）；tag 误用按普通 error 上抛（handler 层 500），不归 ValidationError 400——服务端结构体定义 bug 归 400 会让排障指错方向
+- refactor(jwt): IssuePair/Refresh 的 ttl 非正判断改写 `min` 内建（Go 1.21+，与「任一非正即拒」等价，语义不变）
+- 现代特性：defer+recover 转 error（#115）、slices.Clone（#116 双向拷贝、#117 选项入参拷贝）、min（ttl 判断）；errors.Join/max 本批无贴合处未强用
+- 版本号取 v0.7.0 而非 v0.6.3：#117 新增公开 API `WithAudienceClaims`（SignOption），0.x 阶段 minor 承载加法 API
+
+关联问题单：kitx#115、kitx#116、kitx#117。
+
 ## [v0.6.2] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）
