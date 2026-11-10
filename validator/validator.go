@@ -5,9 +5,14 @@ import "sync/atomic"
 // Validator 是参数验证接口。
 type Validator interface {
 	// Validate 验证结构体（基于 struct tag）。
+	//
+	// 契约：panic 不出网（#115）——上游引擎对「tag 与字段 Kind 不匹配」等非法
+	// 组合的 panic 由门面就地转 error，实现方不得把 panic 透传给调用方。
 	Validate(obj any) error
 
 	// ValidateVar 验证单个变量。
+	//
+	// 契约：panic 不出网（#115），同 Validate。
 	ValidateVar(field any, tag string) error
 
 	// RegisterValidation 注册自定义验证规则。
