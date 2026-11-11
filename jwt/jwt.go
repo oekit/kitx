@@ -6,8 +6,9 @@
 // 两形态共享同一套 SignOption/ParseOption/Claims 与校验语义；每个入口固定自己
 // 的算法（RS256 入口只认 RS256、HS256 入口只认 HS256），密钥形态绑定算法关死
 // alg 混淆。解析侧校验入口：WithAudience（#66）与 WithExpectedIssuer（#95）；
-// 签发侧 aud 出口：WithAudienceClaims（#117）——与 WithAudience 闭环，库签发的
-// 令牌可带 aud，多受众部署不再被迫手搓 payload。
+// 解析侧安全缺省：强制 exp（#135，WithAllowNoExpiry 豁免）与 30s leeway（#137，
+// WithLeeway 覆盖）；签发侧 aud 出口：WithAudienceClaims（#117）——与
+// WithAudience 闭环，库签发的令牌可带 aud，多受众部署不再被迫手搓 payload。
 //
 // 硬契约（与既有消费方互通，不可改）：
 //   - RS256 形态 alg 恰为 RS256；HS256 形态 alg 恰为 HS256
@@ -220,18 +221,36 @@ func signPayload(opts []SignOption) (map[string]any, error) {
 	return payload, nil
 }
 
+// defaultLeeway 是解析校验缺省的时钟偏移容忍（#137）：多实例部署下各实例
+// NTP 步进节奏不同，零容忍会让 iat==nbf 的刚签发令牌在偏移实例上被
+// ErrTokenNotValidYet 拒一次（401 后客户端重试才恢复，无日志定位点）。取
+// 30s——覆盖秒级漂移与常规 NTP 阶跃，又不过分拉长过期令牌的残效窗口（#137
+// 建议区间 30s~60s 的安全侧取值）；显式 WithLeeway 可覆盖，WithLeeway(0) 仍是
+// 严格零容忍。
+const defaultLeeway = 30 * time.Second
+
 // parseOptions 是解析选项的内部表示。
 type parseOptions struct {
-	leeway   time.Duration
-	audience []string
-	issuer   string
+	leeway        time.Duration
+	audience      []string
+	issuer        string
+	allowNoExpiry bool
 }
 
 // ParseOption 是 Parse 的函数选项。
 type ParseOption func(*parseOptions)
 
-// WithLeeway 设置时钟偏移容忍。
+// WithLeeway 设置时钟偏移容忍（覆盖缺省值）。缺省 30s（#137：跨实例部署的
+// 秒级时钟漂移不应把刚签发的令牌拒在门外）；显式传 0 表示严格零容忍。
 func WithLeeway(d time.Duration) ParseOption { return func(o *parseOptions) { o.leeway = d } }
+
+// WithAllowNoExpiry 豁免「令牌必须带 exp」的缺省强制（#135）。缺省 Parse/
+// ParseSymmetric/Manager.ParseTyped 一律拒绝无 exp 令牌——签发侧「永不过期
+// 令牌是最危险的缺省」（WithTTL(0) panic，#65）的解析侧闭环：golang-jwt v5
+// 仅在 exp 存在时校验，无 exp 令牌缺省放行会让 #65 的纪律在消费面单侧失效。
+// 只影响 exp 强制，其余校验（签名/nbf/aud/iss）不变。确有消费无 exp 令牌的
+// 场景（签发侧 WithNoExpiry 的对偶）请显式豁免——名字即审计信号，grep 得到。
+func WithAllowNoExpiry() ParseOption { return func(o *parseOptions) { o.allowNoExpiry = true } }
 
 // WithAudience 设置期望受众（#66）：令牌 aud 命中任一即通过；令牌无 aud 时
 // 拒绝（fail-closed）。不设置时不校验 aud（向后兼容）——签名校验只证明
@@ -255,23 +274,31 @@ func WithExpectedIssuer(expected string) ParseOption {
 	return func(o *parseOptions) { o.issuer = expected }
 }
 
-// Parse 校验并解析令牌（RS256-only，缺省零 leeway、不校验 aud/iss）。对称形态
-// （HS256 共享密钥）见 ParseSymmetric（#86）——两入口共享校验语义。
+// Parse 校验并解析令牌（RS256-only，不校验 aud/iss）。对称形态（HS256 共享
+// 密钥）见 ParseSymmetric（#86）——两入口共享校验语义。
+//
+// 安全缺省（与签发侧纪律闭环）：
+//   - 强制 exp（#135）：无 exp 令牌一律拒绝——「永不过期令牌是最危险的缺省」
+//     （签发侧 WithTTL(0) panic，#65）在解析侧不能单侧失效；确有消费无 exp
+//     令牌的场景显式 WithAllowNoExpiry 豁免（对偶签发侧 WithNoExpiry）；
+//   - 缺省 leeway 30s（#137）：跨实例部署的秒级时钟漂移不应把刚签发的令牌
+//     拒在门外；WithLeeway 可覆盖（显式 0 = 严格零容忍）。
 //
 // 错误链保留（#70）：失败时外层哨兵 ErrInvalidToken 与 gojwt 底层 sentinel
 // （ErrTokenExpired/ErrTokenSignatureInvalid/ErrTokenNotValidYet 等）同时可
-// errors.Is——业务侧可据此分流「过期→走刷新、签名坏→踢下线」。
+// errors.Is——业务侧可据此分流「过期→走刷新、签名坏→踢下线」。缺 exp 报
+// ErrTokenRequiredClaimMissing，同样可 errors.Is。
 //
 // 已注册声明（iss/sub/aud/jti/exp/iat/nbf）收进 RegisteredClaims；其余进 Extra。
 // iss/sub/jti 存在但非字符串时拒绝（#67）：RFC 7519 §4.1.1/§4.1.2 要求 iss/sub
 // MUST be a String，类型异常即规格违规令牌，fail-closed 而非静默归零放行
 // （golang-jwt 上游 MapClaims.GetSubject 对类型异常同样返回错误）；声明缺失
-// 维持零值不报错——缺失声明的令牌按消费方自身的校验责任走。
+// 维持零值不报错（exp 除外，见上）——缺失声明的令牌按消费方自身的校验责任走。
 func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, error) {
 	if pub == nil {
 		return nil, fmt.Errorf("%w: 缺少公钥", ErrInvalidToken)
 	}
-	o := &parseOptions{}
+	o := &parseOptions{leeway: defaultLeeway}
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -293,11 +320,15 @@ func Parse(token string, pub *rsa.PublicKey, opts ...ParseOption) (*Claims, erro
 }
 
 // newParser 构造解析器（#86：入口绑定算法——单算法 WithValidMethods 白名单，
-// RS256 入口只认 RS256、HS256 入口只认 HS256，密钥形态绑定算法关死 alg 混淆）。
+// RS256 入口只认 RS256、HS256 入口只认 HS256，密钥形态绑定算法关死 alg 混淆；
+// #135 缺省 WithExpirationRequired 强制 exp，WithAllowNoExpiry 显式豁免）。
 func newParser(o *parseOptions, alg string) *gojwt.Parser {
 	parserOpts := []gojwt.ParserOption{
 		gojwt.WithValidMethods([]string{alg}),
 		gojwt.WithLeeway(o.leeway),
+	}
+	if !o.allowNoExpiry {
+		parserOpts = append(parserOpts, gojwt.WithExpirationRequired())
 	}
 	if len(o.audience) > 0 {
 		parserOpts = append(parserOpts, gojwt.WithAudience(o.audience...))
@@ -311,17 +342,17 @@ func newParser(o *parseOptions, alg string) *gojwt.Parser {
 // claimsFromMap 把 MapClaims 收进 Claims（#86：RS256/HS256 两入口共享同一份
 // claims 收集与类型校验语义——#67 类型异常 fail-closed、#70 错误链对两形态同效）。
 func claimsFromMap(mc gojwt.MapClaims) (*Claims, error) {
-	iss, err := mapStr(mc, "iss")
+	iss, err := mustStr(mc, "iss")
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, err
 	}
-	sub, err := mapStr(mc, "sub")
+	sub, err := mustStr(mc, "sub")
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, err
 	}
-	jti, err := mapStr(mc, "jti")
+	jti, err := mustStr(mc, "jti")
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, err
 	}
 	out := &Claims{Extra: map[string]any{}}
 	out.RegisteredClaims = gojwt.RegisteredClaims{
@@ -354,6 +385,17 @@ func claimsFromMap(mc gojwt.MapClaims) (*Claims, error) {
 		}
 	}
 	return out, nil
+}
+
+// mustStr 取 string 声明并统一做 ErrInvalidToken 包装（#134：claimsFromMap 的
+// iss/sub/jti 三段同构错误包装收敛单点；双 %w 与 #70 口径一致——外层可 Is 到
+// ErrInvalidToken，内层类型异常错误链也保留）。
+func mustStr(mc gojwt.MapClaims, key string) (string, error) {
+	s, err := mapStr(mc, key)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidToken, err)
+	}
+	return s, nil
 }
 
 // mapStr 取 string 声明（#67）：缺失返回 ("", nil)——缺失按消费方自身的校验

@@ -229,6 +229,8 @@ func gojwtToken(priv *rsa.PrivateKey, sub, source string) *gojwt.Token {
 			Subject:  sub,
 			ID:       "jti-x",
 			IssuedAt: gojwt.NewNumericDate(time.Now()),
+			// #135 起解析侧缺省强制 exp，测试替身令牌与真实令牌同形必带 exp。
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(time.Hour)),
 		},
 		Source: source,
 	}
@@ -240,8 +242,13 @@ func gojwtToken(priv *rsa.PrivateKey, sub, source string) *gojwt.Token {
 // rawClaimsToken 用 gojwt.MapClaims 直接构造令牌（#71 后 WithClaim 不能注入
 // 注册声明，测试需要构造带 aud / 类型异常注册声明的令牌时改走这条路，
 // 模拟「第三方/异常形态签发方」的产物）。header 保持硬契约形态（只含 alg）。
+// claims 未带 exp 时注入远期 exp（#135 起解析侧缺省强制 exp，有效令牌替身
+// 必须同形；专门测「缺 exp 被拒」的用例用显式 MapClaims 绕开本兜底）。
 func rawClaimsToken(t *testing.T, kp *KeyPair, claims gojwt.MapClaims) string {
 	t.Helper()
+	if _, ok := claims["exp"]; !ok {
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+	}
 	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, claims)
 	tok.Header = map[string]any{"alg": "RS256"}
 	s, err := tok.SignedString(kp.Private)
@@ -364,7 +371,9 @@ func TestWithTTLZeroPanics(t *testing.T) {
 	_, _ = Sign(kp, WithSubject("u"), WithTTL(0))
 }
 
-// #65：无过期令牌必须显式 WithNoExpiry——payload 不含 exp 且可正常解析；与 WithTTL last-wins。
+// #65：无过期令牌必须显式 WithNoExpiry——payload 不含 exp；与 WithTTL last-wins。
+// #135 起解析侧缺省强制 exp，消费无 exp 令牌必须显式 WithAllowNoExpiry 豁免
+// （对偶签发侧 WithNoExpiry）——同一测试钉住两侧口径。
 func TestWithNoExpiry(t *testing.T) {
 	kp := newTestKeyPair(t)
 	token, err := Sign(kp, WithSubject("u"), WithNoExpiry())
@@ -375,8 +384,11 @@ func TestWithNoExpiry(t *testing.T) {
 	if _, ok := payload["exp"]; ok {
 		t.Fatalf("payload must not contain exp, got %v", payload)
 	}
-	if _, err := Parse(token, kp.Public); err != nil {
-		t.Fatalf("Parse() error = %v", err)
+	if _, err := Parse(token, kp.Public); err == nil {
+		t.Fatal("Parse() on no-exp token must fail by default (#135 exp required)")
+	}
+	if _, err := Parse(token, kp.Public, WithAllowNoExpiry()); err != nil {
+		t.Fatalf("Parse(WithAllowNoExpiry) error = %v, want nil（#135 豁免口）", err)
 	}
 	// last-wins：WithNoExpiry 之后再 WithTTL 恢复写 exp。
 	token2, err := Sign(kp, WithSubject("u"), WithNoExpiry(), WithTTL(time.Hour))
@@ -386,6 +398,51 @@ func TestWithNoExpiry(t *testing.T) {
 	payload2 := decodeSegment(t, token2, 1)
 	if _, ok := payload2["exp"]; !ok {
 		t.Fatalf("WithTTL after WithNoExpiry must re-enable exp (last-wins), got %v", payload2)
+	}
+}
+
+// #135：解析侧缺省强制 exp——无 exp 令牌一律拒绝（错误链双可 Is 外层
+// ErrInvalidToken 与底层 ErrTokenRequiredClaimMissing），显式 WithAllowNoExpiry
+// 豁免（对偶签发侧 WithNoExpiry）后放行且 claims 正常收集。签发侧 WithTTL(0)
+// panic（#65）的纪律由此在消费面闭环。
+func TestParseRequiresExpiry(t *testing.T) {
+	kp := newTestKeyPair(t)
+	// 手工构造无 exp 令牌（rawClaimsToken 会兜底注入 exp，绕开它）。
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodRS256, gojwt.MapClaims{"sub": "u"})
+	tok.Header = map[string]any{"alg": "RS256"}
+	noExp, err := tok.SignedString(kp.Private)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+
+	_, err = Parse(noExp, kp.Public)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("Parse(no-exp) must wrap ErrInvalidToken, got %v", err)
+	}
+	if !errors.Is(err, gojwt.ErrTokenRequiredClaimMissing) {
+		t.Fatalf("Parse(no-exp) must wrap ErrTokenRequiredClaimMissing, got %v", err)
+	}
+
+	claims, err := Parse(noExp, kp.Public, WithAllowNoExpiry())
+	if err != nil {
+		t.Fatalf("Parse(no-exp, WithAllowNoExpiry) error = %v, want nil", err)
+	}
+	if claims.Subject != "u" {
+		t.Fatalf("Subject = %q, want u", claims.Subject)
+	}
+}
+
+// #137：缺省 leeway 30s——nbf 略超当前时刻（10s，秒级时钟漂移量级）的刚签发
+// 令牌缺省放行；显式 WithLeeway(0) 回到严格零容忍即拒绝（可配置性不丢）。
+func TestParseDefaultLeeway(t *testing.T) {
+	kp := newTestKeyPair(t)
+	soon := rawClaimsToken(t, kp, gojwt.MapClaims{"sub": "u", "nbf": time.Now().Add(10 * time.Second).Unix()})
+
+	if _, err := Parse(soon, kp.Public); err != nil {
+		t.Fatalf("Parse(nbf+10s) error = %v, want nil（缺省 leeway 30s 容忍秒级漂移，#137）", err)
+	}
+	if _, err := Parse(soon, kp.Public, WithLeeway(0)); !errors.Is(err, gojwt.ErrTokenNotValidYet) {
+		t.Fatalf("Parse(nbf+10s, WithLeeway(0)) = %v, want ErrTokenNotValidYet（显式零容忍）", err)
 	}
 }
 
