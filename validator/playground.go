@@ -47,33 +47,10 @@ func New() *PlaygroundValidator {
 // 是服务端结构体定义 bug，按普通 error 上抛（handler 层归 500），不走
 // ValidationError 400——把服务端 bug 归成客户端 400 会让排障指错方向（与
 // RegisterValidation 注册期 panic 转 error 同口径）。
-func (pv *PlaygroundValidator) Validate(obj any) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = enginePanicError(fmt.Sprintf("Validate(%T)", obj), r)
-		}
-	}()
-	err = pv.validate.Struct(obj)
-	if err == nil {
-		return nil
-	}
-
-	validationErrors, ok := err.(validator.ValidationErrors)
-	if !ok {
-		return err
-	}
-
-	fieldErrors := make([]FieldError, 0, len(validationErrors))
-	for _, fe := range validationErrors {
-		fieldErrors = append(fieldErrors, FieldError{
-			Field:   fe.Field(),
-			Tag:     fe.Tag(),
-			Param:   fe.Param(),
-			Message: formatMessage(fe),
-		})
-	}
-
-	return NewFieldValidationError(fieldErrors)
+func (pv *PlaygroundValidator) Validate(obj any) error {
+	return withPanicGuard(fmt.Sprintf("Validate(%T)", obj), func() error {
+		return assembleValidationError(pv.validate.Struct(obj), validator.FieldError.Field)
+	})
 }
 
 // ValidateVar 验证单个变量。
@@ -102,37 +79,15 @@ func (pv *PlaygroundValidator) ValidateVarNamed(field any, fieldName string, tag
 // fieldName 只在底层给不出字段名（Var 路径）时兜底；结构体校验路径
 // （Validate）始终用真实的结构体字段名。门面闸（#115）与 Validate 同口径：
 // 上游引擎 panic 就地转 error，ValidateVar/ValidateVarNamed 共用本路径。
-func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag string) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = enginePanicError(fmt.Sprintf("ValidateVar(%T, tag=%q)", field, tag), r)
-		}
-	}()
-	err = pv.validate.Var(field, tag)
-	if err == nil {
-		return nil
-	}
-
-	validationErrors, ok := err.(validator.ValidationErrors)
-	if !ok {
-		return err
-	}
-
-	fieldErrors := make([]FieldError, 0, len(validationErrors))
-	for _, fe := range validationErrors {
-		name := fe.Field()
-		if name == "" {
-			name = fieldName
-		}
-		fieldErrors = append(fieldErrors, FieldError{
-			Field:   name,
-			Tag:     fe.Tag(),
-			Param:   fe.Param(),
-			Message: formatMessageNamed(fe, name),
+func (pv *PlaygroundValidator) validateVar(field any, fieldName string, tag string) error {
+	return withPanicGuard(fmt.Sprintf("ValidateVar(%T, tag=%q)", field, tag), func() error {
+		return assembleValidationError(pv.validate.Var(field, tag), func(fe validator.FieldError) string {
+			if name := fe.Field(); name != "" {
+				return name
+			}
+			return fieldName
 		})
-	}
-
-	return NewFieldValidationError(fieldErrors)
+	})
 }
 
 // RegisterValidation 注册自定义验证规则。
@@ -189,11 +144,47 @@ func enginePanicError(op string, r any) error {
 	return fmt.Errorf("validator: %s validation panicked (tag/field-kind mismatch is the usual cause, e.g. min/max/len on bool or struct fields): %v", op, r)
 }
 
+// withPanicGuard 把上游校验引擎的 panic 就地转 error（#115 门面闸；#133 收敛
+// Validate/validateVar 的同构 recover 结构为单点）：op 是入口定位（进错误消息
+// 与日志），fn 是真正的校验动作。
+func withPanicGuard(op string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = enginePanicError(op, r)
+		}
+	}()
+	return fn()
+}
+
+// assembleValidationError 把上游校验错误组装成门面结构化错误（#133：Validate
+// 与 validateVar 的共享尾段）。非 ValidationErrors 的错误（引擎自身故障等）
+// 原样上抛。nameOf 决定字段名口径——结构体路径取底层真实字段名（method
+// expression validator.FieldError.Field 直传），Var 路径底层给不出字段名
+// （fe.Field()==""）时经闭包兜底调用方传入的 fieldName；消息统一走
+// formatMessageNamed（含空名回退链，消息永远有主语）。
+func assembleValidationError(err error, nameOf func(fe validator.FieldError) string) error {
+	validationErrors, ok := err.(validator.ValidationErrors)
+	if !ok {
+		return err
+	}
+	fieldErrors := make([]FieldError, 0, len(validationErrors))
+	for _, fe := range validationErrors {
+		name := nameOf(fe)
+		fieldErrors = append(fieldErrors, FieldError{
+			Field:   name,
+			Tag:     fe.Tag(),
+			Param:   fe.Param(),
+			Message: formatMessageNamed(fe, name),
+		})
+	}
+	return NewFieldValidationError(fieldErrors)
+}
+
 // RegisterTranslation 注册验证错误的翻译。
 //
-// 当前实现不支持翻译引擎：错误消息已通过 formatMessage English prompts via formatMessage。
+// 当前实现不支持翻译引擎：错误消息已通过 formatMessageNamed 内置英文提示。
 // 调用将始终返回 ErrTranslationNotSupported，避免调用方误以为翻译已注册成功。
-// 如需自定义消息，请扩展 formatMessage 或实现自定义 Validator。
+// 如需自定义消息，请扩展 formatMessageNamed 或实现自定义 Validator。
 func (pv *PlaygroundValidator) RegisterTranslation(locale, tag, msg string) error {
 	return ErrTranslationNotSupported
 }
@@ -208,11 +199,6 @@ func (pv *PlaygroundValidator) Validate_() *validator.Validate {
 // 底层 go-playground/validator 的 Var 路径不返回字段名（fe.Field() == ""），
 // 直接用会得到 " is required" 这种前导空格的残缺消息，以及 Map() 里的空键。
 const defaultVarFieldName = "value"
-
-// formatMessage 生成友好的错误消息（字段名取底层的 fe.Field()）。
-func formatMessage(fe validator.FieldError) string {
-	return formatMessageNamed(fe, fe.Field())
-}
 
 // formatMessageNamed 生成友好的错误消息，字段名用 name。
 //

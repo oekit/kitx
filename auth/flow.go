@@ -276,16 +276,7 @@ func (f *Flow) Logout(ctx context.Context, access, refresh string) error {
 	} else if _, err := f.sessions.Kick(ctx, s.ID); err != nil {
 		errs = append(errs, fmt.Errorf("auth: 会话下线失败: %w", err))
 	}
-	if access != "" {
-		if err := authz.RevokeToken(ctx, f.revoker, access, f.ttlAccess); err != nil {
-			errs = append(errs, fmt.Errorf("auth: 拉黑 access 失败: %w", err))
-		}
-	}
-	if refresh != "" {
-		if err := authz.RevokeToken(ctx, f.revoker, refresh, f.ttlRefresh); err != nil {
-			errs = append(errs, fmt.Errorf("auth: 拉黑 refresh 失败: %w", err))
-		}
-	}
+	errs = append(errs, f.revokePair(ctx, "auth: 登出", access, refresh))
 	return errors.Join(errs...)
 }
 
@@ -405,7 +396,7 @@ func (f *Flow) issueTail(ctx context.Context, u *User, meta SessionMeta) (*Token
 	}
 	sid, err := newSessionID()
 	if err != nil {
-		revokeErr := f.revokePair(ctx, access, refresh)
+		revokeErr := f.revokePair(ctx, "auth: 回收无主令牌", access, refresh)
 		return nil, errors.Join(err, revokeErr)
 	}
 	sess := authz.Session{
@@ -422,23 +413,26 @@ func (f *Flow) issueTail(ctx context.Context, u *User, meta SessionMeta) (*Token
 	if err := f.sessions.Register(ctx, sess, f.ttlRefresh); err != nil {
 		// 签发与登记一次落地（IssuePair 契约）：登记失败回收刚签的双令牌，
 		// 不放行无主（不可强踢）的令牌对。
-		revokeErr := f.revokePair(ctx, access, refresh)
+		revokeErr := f.revokePair(ctx, "auth: 回收无主令牌", access, refresh)
 		return nil, errors.Join(fmt.Errorf("auth: 会话登记失败: %w", err), revokeErr)
 	}
 	return &TokenPair{Access: access, Refresh: refresh, Session: sess}, nil
 }
 
-// revokePair 回收一对已签发令牌（issueTail 失败路径的无主令牌清理）。
-func (f *Flow) revokePair(ctx context.Context, access, refresh string) error {
+// revokePair 双令牌拉黑的单点实现（#131：Logout 的呈现令牌拉黑与 issueTail
+// 失败路径的无主令牌回收共用同一份「access→ttlAccess / refresh→ttlRefresh」
+// TTL 口径——改 ttl 语义不再需要同步两处）。op 是错误前缀，标识调用路径；
+// access/refresh 为空串跳过该路；拉黑失败 errors.Join 聚合（错误链 %w 保留）。
+func (f *Flow) revokePair(ctx context.Context, op, access, refresh string) error {
 	var errs []error
 	if access != "" {
 		if err := authz.RevokeToken(ctx, f.revoker, access, f.ttlAccess); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: 拉黑 access 失败: %w", op, err))
 		}
 	}
 	if refresh != "" {
 		if err := authz.RevokeToken(ctx, f.revoker, refresh, f.ttlRefresh); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: 拉黑 refresh 失败: %w", op, err))
 		}
 	}
 	return errors.Join(errs...)

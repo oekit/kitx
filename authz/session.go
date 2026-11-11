@@ -64,12 +64,14 @@ type SessionRegistry interface {
 	ListByUser(ctx context.Context, userID string) ([]Session, error)
 	// Kick 强踢单会话：双 hash 拉黑 + 删键，**原子认领**。三态契约：
 	//   - (true, nil)：完整下线（拉黑与删键都已落地）；
-	//   - (false, nil)：登记不存在（幂等强踢的常态 / 轮换竞态的败方）；
+	//   - (false, nil)：登记不存在（幂等强踢的常态 / 轮换竞态的败方 / 同 ID
+	//     会话已重建的 ABA 败方，#136）；
 	//   - (false, err)：拉黑落地失败，登记**保留**（可重试）。
 	//
 	// 原子认领（claim）是 refresh 轮换防重放的拍板点：并发轮换/强踢竞争同一
 	// 会话时恰有一个调用拿到 true，其余按败方拒绝——「旧 refresh 二次使用被拒」
-	// 不靠时序运气。
+	// 不靠时序运气。ABA 提示（#136）：解锁-重锁窗口里同 ID 会话可能被「踢掉 +
+	// 重建」，实现必须按登记项**身份**复核（而非存在性），不得误删重建会话。
 	Kick(ctx context.Context, id string) (bool, error)
 	// KickUser 强踢某用户全部在线会话（#119 强踢全会话；改密吊销钩子的落地
 	// 一半）。返回完整下线的会话数；部分失败时已踢的不回滚，错误聚合上抛
@@ -221,6 +223,11 @@ func (m *MemRegistry) ListByUser(ctx context.Context, userID string) ([]Session,
 //
 // 时序：先拉黑（登记保留、失败可重试）后原子删键（claim 拍板）——拉黑失败
 // 时不动登记，避免「登记没了、令牌还活着」的假下线。
+//
+// ABA 防护（#136）：解锁-重锁窗口里同 ID 登记可能被「其它 Kick/KickUser 踢掉
+// + Register 重建」（Register 摘旧键再登记新项，换的是新 *regEntry）。重锁后
+// 按**登记项身份**（指针比较，天然可比较）复核而非存在性——只判存在会把重建
+// 会话连同索引静默误删还报 true，强踢漏拉黑且用户被莫名下线。
 func (m *MemRegistry) Kick(ctx context.Context, id string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -253,8 +260,11 @@ func (m *MemRegistry) Kick(ctx context.Context, id string) (bool, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.byID[id]; !ok {
-		return false, nil // 竞态败方：已被其它 Kick/KickUser 认领
+	// 身份复检（#136 ABA 修复）：!ok 是竞态败方（已被其它 Kick/KickUser 认领）；
+	// cur != entry 是同 ID 会话已重建（ABA）——重建的会话未被本调用拉黑，
+	// 不得删，按败方拒绝。
+	if cur, ok := m.byID[id]; !ok || cur != entry {
+		return false, nil
 	}
 	m.removeLocked(id)
 	return true, nil

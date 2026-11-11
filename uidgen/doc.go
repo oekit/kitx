@@ -8,12 +8,6 @@
 //	uidgen.ExtractSnowflakeMachineID(id)
 //	uidgen.ExtractSnowflakeSequence(id)
 //
-// Extract 函数（epoch = 2024-01-01）用于从旧式 ID 中提取元数据：
-//
-//	uidgen.ExtractTime(id)
-//	uidgen.ExtractWorkerID(id)
-//	uidgen.ExtractSequence(id)
-//
 // UUID 系列（与 Snowflake 无关）见 uuid.go.
 //
 // ULID 系列（26 字符，字典序 == 时间序）见 ulid.go——面向「文本主键 +

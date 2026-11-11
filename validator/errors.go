@@ -16,9 +16,9 @@ import (
 var ErrNilValidationFunc = errors.New("validator: validation func must not be nil")
 
 // ErrTranslationNotSupported 表示当前验证器不支持错误消息翻译。
-// PlaygroundValidator 的错误消息已通过 formatMessage 内置英文提示，
-// 如需自定义消息请扩展 formatMessage 或实现自定义 Validator。
-var ErrTranslationNotSupported = errors.New("validator: translation not supported; messages are built-in via formatMessage")
+// PlaygroundValidator 的错误消息已通过 formatMessageNamed 内置英文提示，
+// 如需自定义消息请扩展 formatMessageNamed 或实现自定义 Validator。
+var ErrTranslationNotSupported = errors.New("validator: translation not supported; messages are built-in via formatMessageNamed")
 
 // ValidationError 包含多个字段验证错误。
 // 实现 BizError 接口（code=400），handler 层的 Fail 会自动识别为 400 Bad Request。

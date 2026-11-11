@@ -10,10 +10,22 @@ import (
 	"time"
 )
 
+// Snowflake 位布局常量（#132：旧式 ID 提取函数族删除后自 generator.go 并入，
+// 唯一消费方是本文件的 Snowflake/ExtractSnowflake* 家族）。
+const (
+	workerBits   = 10
+	sequenceBits = 12
+
+	maxWorker    = (1 << workerBits) - 1   // 1023, 10 bits 全部置 1
+	sequenceMask = (1 << sequenceBits) - 1 // 12 bits 掩码
+
+	workerShift    = sequenceBits              // 12
+	timestampShift = workerBits + sequenceBits // 22
+)
+
 // snowflakeEpoch 是 Snowflake ID 使用的 epoch 起点（毫秒）.
 // 2025-01-01 00:00:00 UTC（1735689600000）。改常量会破坏存量 ID 的
 // ExtractSnowflakeTime 解析，只能改注释对齐事实；距溢出余量约 68 年.
-// 区别于旧式 ID 的 epoch（2024-01-01）：Snowflake 提取时间用 ExtractSnowflakeTime.
 const snowflakeEpoch int64 = 1735689600000
 
 // defaultClockBackTolerance 是缺省的时钟回拨容忍上限（#72）：回拨不超过它时
@@ -240,7 +252,6 @@ func (s *Snowflake) notifyClockBack(back time.Duration) {
 }
 
 // ExtractSnowflakeTime 从 Snowflake ID 中提取生成时间.
-// 注意：与 ExtractTime 不可混用——epoch 不同（2025 vs 2024）.
 func ExtractSnowflakeTime(id int64) time.Time {
 	ts := (id >> timestampShift) + snowflakeEpoch
 	return time.UnixMilli(ts)

@@ -1,3 +1,18 @@
+## [v0.9.0] — 2026-11-12
+
+- **BREAKING** feat(jwt): 解析侧缺省强制 exp（#135）——签发侧「永不过期令牌是最危险的缺省」（WithTTL(0) panic，#65）的解析侧闭环：golang-jwt v5 仅在 exp 存在时校验，无 exp 令牌此前缺省放行，#65 纪律在消费面单侧失效；现 Parse/ParseSymmetric/Manager.ParseTyped 对无 exp 令牌一律拒绝（底层 ErrTokenRequiredClaimMissing 可 errors.Is），确有消费无 exp 令牌的场景显式用新增 `WithAllowNoExpiry()` ParseOption 豁免（对偶签发侧 WithNoExpiry，名字即审计信号）。**缺省行为变更：此前可解析的无 exp 令牌现在被拒**——库自签发（恒带 exp）的链路不受影响
+- **BREAKING** refactor(uidgen): 删除旧式 ID 提取函数族死代码（#132）——`ExtractTime`/`ExtractWorkerID`/`ExtractSequence` 三函数与旧 epoch、maxSequence 常量全工作区零引用（现行 API 是 ExtractSnowflakeTime 家族，两者 epoch 不同 2025 vs 2024 本就不可混用），连同 generator.go 一并删除，位布局常量（workerBits/sequenceMask/workerShift/timestampShift/maxWorker/sequenceBits）并入 snowflake.go；新用例请用 `ExtractSnowflakeTime`/`ExtractSnowflakeMachineID`/`ExtractSnowflakeSequence`
+- fix(authz): `MemRegistry.Kick` 解锁-重锁窗口的 ABA 身份复检（#136）——重锁后按登记项指针（身份）复核而非存在性：「A 读 E1 → B 完整踢掉 E1 → C 同 ID 重建 → A 重锁误把 C 的新会话连索引静默删除还报 true」的窗口闭合（*regEntry 指针天然可比较，一次比较收口）；补 -race 竞态回归测试（闸门替身把首次拉黑卡在锁外，B 踢 + C 重建定序交错，旧实现红/修复后绿）
+- feat(jwt): 解析缺省 leeway 30s（#137）——跨实例部署下秒级时钟漂移不再把 iat==nbf 的刚签发令牌拒一次（此前零容忍：ErrTokenNotValidYet 401 后客户端重试才恢复，无日志定位点）；WithLeeway 显式可覆盖（WithLeeway(0) 仍严格零容忍），auth.Flow 共享解析选项全路径同样吃到缺省
+- refactor(auth): Logout 与 revokePair 双令牌拉黑逻辑收敛单点（#131）——revokePair 收 op 前缀参数（错误消息带调用路径定位），Logout 主体变为会话 Kick + revokePair + errors.Join；「access→ttlAccess / refresh→ttlRefresh」双令牌 TTL 口径从此单点（改 ttl 语义不再需要同步两处）
+- refactor(validator): Validate/validateVar 的错误组装循环与 recover 结构收敛（#133）——`withPanicGuard(op, fn)` 单点收 recover→enginePanicError、`assembleValidationError(err, nameOf)` 单点收 ValidationErrors 组装（闭包/method expression 注入字段名口径：结构体路径直传 `validator.FieldError.Field`，Var 路径闭包兜底），行为不变
+- refactor(jwt): claimsFromMap 的 iss/sub/jti 三段同构错误包装收敛 `mustStr`（#134），双 %w 与 #70 错误链口径统一（%v→%w，消息文本不变）
+- build: Go 地板 1.24.0 → 1.26.0（go.mod go 指令与 CI go-version '1.26'）
+- 现代特性：method expression + 闭包（validator 字段名口径注入）、atomic.Bool（竞态测试闸门 CAS 占位防误卡死）；泛型本批无贴合处未强用
+- 版本号取 v0.9.0：#132 删导出符号 + #135 解析缺省行为变更，0.x 阶段 minor 承载（均带 **BREAKING** 标注）
+
+关联问题单：kitx#131、kitx#132、kitx#133、kitx#134、kitx#135、kitx#136、kitx#137。
+
 ## [v0.8.0] — 2026-11-11
 
 - feat(authz): 双 token **状态面**原语（#119，新子包）——撤销黑名单（token 级 / 用户级截断）+ 在线会话注册表（设备/会话维度登记、枚举、强踢）：`TokenHash`（sha256hex）收编键空间唯一产出口（下游 4 服务两份拷贝靠注释对齐、漂移即强踢失效的单点）；`Revoker` 接口化存储（Revoke/Revoked/RevokeUser/RevokedUser）+ `MemRevoker` 内存实现（Redis 等持久实现按同一契约下游落地）；`Session`/`SessionRegistry`（Register 登记 TTL=refresh 剩余寿命、GetByRefreshHash 轮换认领键、ListByUser 管理端枚举、Kick **双 hash 拉黑+删键的原子认领**（三态返回：true=完整下线 / false=nil=不在（幂等强踢/竞态败方）/ false+err=拉黑失败保留登记可重试）、KickUser 强踢全会话）+ `MemRegistry` 内存实现；与 kitx/jwt 校验面经 `auth.IsRevoked` / `auth.Flow.ParseAccess` 组合消费（pair.go 留白的状态面收编）

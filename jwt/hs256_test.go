@@ -188,8 +188,11 @@ func TestSymmetricSignRejectsReservedClaimInjection(t *testing.T) {
 // gojwt 原生构造（aud string 形态），走的是同一份 claimsFromMap 收集。
 func TestParseSymmetricWithAudience(t *testing.T) {
 	// aud 是注册声明、不可经 WithClaim 注入（#71），用 gojwt 原生构造带 aud 的
-	// 第三方 IdP 产物。
-	tok := gojwt.NewWithClaims(gojwt.SigningMethodHS256, gojwt.MapClaims{"aud": "svc-a"})
+	// 第三方 IdP 产物（#135 起解析侧缺省强制 exp，替身令牌与真实令牌同形带 exp）。
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodHS256, gojwt.MapClaims{
+		"aud": "svc-a",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
 	tok.Header = map[string]any{"alg": "HS256"}
 	thirdParty, err := tok.SignedString(testHS256Secret(t))
 	if err != nil {
