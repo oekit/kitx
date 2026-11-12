@@ -2,13 +2,19 @@ package uidgen
 
 import (
 	"errors"
-	"log/slog"
 	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oekit/logx"
 )
+
+// log 是本包的懒解析日志器（SDK/基础包规范：Delegating，禁止 Default()）。
+// 此前本包直连标准库 slog——绕过 logx.SetDefault 的后端替换与 LOG_LEVEL 级别
+// 控制，且手写 "err" 字面量违反 AGENTS.md 的 logx.ErrKey 红线（#145）。
+var log = logx.Delegating("kitx/uidgen")
 
 // Snowflake 位布局常量（#132：旧式 ID 提取函数族删除后自 generator.go 并入，
 // 唯一消费方是本文件的 Snowflake/ExtractSnowflake* 家族）。
@@ -87,7 +93,7 @@ func WithClockBackTolerance(d time.Duration) SnowflakeOption {
 // WithOnClockBack 注册大幅时钟回拨通报回调（#72）：回拨幅度超过容忍上限时，
 // 生成器放弃等待、转进位生成——ID 时间戳领先真实时钟直到追平，本回调以实际
 // 回拨幅度 back 触发，每轮回拨（从进入进位生成到真实时钟追平）只触发一次。
-// 未注册时缺省 slog.Warn。
+// 未注册时经包级 logx 日志器（kitx/uidgen）打 WARN。
 //
 // 回调在生成器持锁状态下同步调用，必须快速返回（记数/投递告警即可）：
 // 阻塞会卡住全进程的 ID 生成；再调 SnowflakeID/InitSnowflake 会死锁。
@@ -136,12 +142,12 @@ func InitSnowflakeWith(machineID int64, opts ...SnowflakeOption) error {
 func InitSnowflakeFromEnv() error {
 	raw := os.Getenv("MACHINE_ID")
 	if raw == "" {
-		slog.Warn("uidgen: MACHINE_ID not set, defaulting to 0; set MACHINE_ID in production to avoid ID collisions")
+		log.Warn("uidgen: MACHINE_ID not set, defaulting to 0; set MACHINE_ID in production to avoid ID collisions")
 		return InitSnowflake(0)
 	}
 	mid, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		slog.Warn("uidgen: invalid MACHINE_ID, defaulting to 0", "value", raw, "err", err)
+		log.Warn("uidgen: invalid MACHINE_ID, defaulting to 0", "value", raw, logx.ErrKey, err)
 		return InitSnowflake(0)
 	}
 	return InitSnowflake(mid)
@@ -164,7 +170,7 @@ func SnowflakeID() int64 {
 		// （0 在 [0,1023] 内）；CAS 失败仅表示已被并发初始化。两种情况下
 		// 重新 Load 都必非 nil。
 		if err := InitSnowflake(0); err != nil {
-			slog.Debug("uidgen: snowflake auto-init raced, using winner's instance", "err", err)
+			log.Debug("uidgen: snowflake auto-init raced, using winner's instance", logx.ErrKey, err)
 		}
 		s = defaultSnowflake.Load()
 	}
@@ -241,13 +247,14 @@ func (s *Snowflake) next() int64 {
 }
 
 // notifyClockBack 通报一次超限时钟回拨（#72）：优先用 WithOnClockBack 注册的
-// 回调，未注册时 slog.Warn 兜底。调用方（next）持锁中同步调用.
+// 回调，未注册时经包级 logx 日志器（kitx/uidgen）打 WARN 兜底。调用方（next）
+// 持锁中同步调用.
 func (s *Snowflake) notifyClockBack(back time.Duration) {
 	if s.onClockBack != nil {
 		s.onClockBack(back)
 		return
 	}
-	slog.Warn("uidgen: snowflake clock moved back beyond tolerance, carry-forward generation engaged (ID timestamps run ahead of wall clock until it catches up)",
+	log.Warn("uidgen: snowflake clock moved back beyond tolerance, carry-forward generation engaged (ID timestamps run ahead of wall clock until it catches up)",
 		"back", back, "tolerance", s.clockBackTolerance)
 }
 

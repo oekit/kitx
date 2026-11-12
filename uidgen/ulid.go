@@ -1,7 +1,6 @@
 package uidgen
 
 import (
-	"crypto/rand"
 	"sync"
 	"time"
 
@@ -72,12 +71,25 @@ var ulidMono struct {
 // 同一毫秒内进程内**严格单调**：熵逐个递增，80 bit 熵用尽则进位到下一毫秒。
 // 时钟回拨时冻结在上一次的毫秒继续递增熵，保证不会出现更小的 ID。
 //
+// crypto/rand 读取失败（运行期环境故障）panic——请求路径请用 ULIDE（#87）。
 // 零第三方依赖：crypto/rand + 标准库。
 func ULID() string {
+	s, err := ULIDE()
+	if err != nil {
+		panic(err.Error())
+	}
+	return s
+}
+
+// ULIDE 是 ULID 的 error 返回变体（#87/#141）：结构与单调语义与 ULID 完全
+// 一致，差异仅在 crypto/rand 读取失败这一**运行期环境故障**——panic 版会把它
+// 升级成进程崩溃，本版返回 error，请求路径（文本主键/会话 ID）可就地降级处理
+// （RandomHexE 同哲学）。X/XE 导出面由此对称，crypto/rand 故障不再击穿进程。
+func ULIDE() (string, error) {
 	// 熵在锁外读：临界区只留几次算术。
-	var entropy [ulidEntropySize]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
-		panic("uidgen: crypto/rand 不可用: " + err.Error())
+	entropy, err := readULIDEntropy()
+	if err != nil {
+		return "", err
 	}
 	now := time.Now().UnixMilli()
 
@@ -96,7 +108,19 @@ func ULID() string {
 		}
 	}
 	ulidMono.lastMS, ulidMono.lastEnt = ms, ent
-	return encodeULID(ms, ent)
+	return encodeULID(ms, ent), nil
+}
+
+// readULIDEntropy 读 80 bit ULID 熵（randomBytes 单一来源：经 randRead 间接层，
+// 必然失败的桩可注入——#87 的运行期故障 error 出口要能测）。
+func readULIDEntropy() ([ulidEntropySize]byte, error) {
+	var ent [ulidEntropySize]byte
+	b, err := randomBytes(ulidEntropySize)
+	if err != nil {
+		return ent, err
+	}
+	copy(ent[:], b)
+	return ent, nil
 }
 
 // ULIDFromTime 用指定时间戳生成 ULID，便于按业务时间回填 ID。
@@ -107,16 +131,29 @@ func ULID() string {
 //
 // t 超出 48 bit 毫秒时间戳范围（Unix 纪元之前，或公元 10889 年之后）时 panic：
 // 这种时间戳编不出合法 ULID，静默截断会得到一个「时间不对但看着正常」的 ID。
+// crypto/rand 读取失败（运行期环境故障）同样 panic——请求路径请用 ULIDFromTimeE（#87）。
 func ULIDFromTime(t time.Time) string {
+	s, err := ULIDFromTimeE(t)
+	if err != nil {
+		panic(err.Error())
+	}
+	return s
+}
+
+// ULIDFromTimeE 是 ULIDFromTime 的 error 返回变体（#87/#141）：入参口径与
+// ULIDFromTime 完全一致——t 超出 48 bit 毫秒范围仍 panic（入参越界是调用方
+// bug，与 checkHexArgs 防呆分层一致）；差异仅在 crypto/rand 读取失败这一
+// 运行期环境故障返回 error。不参与 ULID() 的单调序列（见 ULIDFromTime）。
+func ULIDFromTimeE(t time.Time) (string, error) {
 	ms := t.UnixMilli()
 	if ms < 0 || ms > ulidMaxTimestamp {
 		panic("uidgen: ULIDFromTime 时间戳超出 48 bit 毫秒范围")
 	}
-	var entropy [ulidEntropySize]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
-		panic("uidgen: crypto/rand 不可用: " + err.Error())
+	entropy, err := readULIDEntropy()
+	if err != nil {
+		return "", err
 	}
-	return encodeULID(ms, entropy)
+	return encodeULID(ms, entropy), nil
 }
 
 // ParseULID 解析 ULID，返回它的毫秒时间戳与 80 bit 熵（10 字节）。
