@@ -1,3 +1,9 @@
+## [v0.9.2] — 2026-11-13
+
+- test(jwt): HS256 主路径补 exp 强制负例——镜像 RS256 TestParseRequiresExpiry（#159）。ParseSymmetric 与 Parse 共用强制逻辑，护栏此前只钉 RS256 侧；zeus 消费的恰是 HS256 路径。纯测试增量零实现改动。
+
+关联问题单：kitx#159。
+
 ## [v0.9.1] — 2026-11-13
 
 - 9 单修复批：isNilValidator 反射判据（#150）、mapTime n==0→nil（#149）、Refresh 空串过滤（#148）、HS256 secret 拷贝（#147）、weakCores 预归一（#146）、uidgen logx 收编（#145）、ULIDE 补齐（#141）、leetNormalize 提出（#140）、ErrInvalidToken 哨兵（#139）；地板对齐 pkg v0.47.0。
