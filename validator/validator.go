@@ -1,6 +1,9 @@
 package validator
 
-import "sync/atomic"
+import (
+	"reflect"
+	"sync/atomic"
+)
 
 // Validator 是参数验证接口。
 type Validator interface {
@@ -51,27 +54,46 @@ func init() {
 
 // SetDefault 设置全局默认验证器。
 //
-// v 为 nil 时**直接 panic**：存进去之后，Default() 会返回 nil 接口，
-// 后续每一次 Default().Validate(obj) 都是空指针崩溃——崩在调用方、栈里只看
-// 得到「validator.Default().Validate」这一行，完全看不出是这里存了个 nil。
-// 快速失败比静默埋雷好。
+// v 为 nil 时**直接 panic**（#150：nil 判定含 typed-nil，如
+// SetDefault((*PlaygroundValidator)(nil))——只判 v == nil 会放行接口里带着
+// 具体类型与 nil 指针的值，故障从构造期推迟到每一次 Validate 调用）：存进去
+// 之后，Default() 会返回坏接口，后续每一次 Default().Validate(obj) 都是空指针
+// 崩溃——崩在调用方、栈里只看得到「validator.Default().Validate」这一行，
+// 完全看不出是这里存了个 nil。快速失败比静默埋雷好。
 func SetDefault(v Validator) {
-	if v == nil {
-		panic("validator: SetDefault(nil) —— 默认验证器不能为 nil")
+	if isNilValidator(v) {
+		panic("validator: SetDefault(nil) —— 默认验证器不能为 nil（typed-nil 同拒：构造期 fail-fast 不落空，#150）")
 	}
 	defaultValidator.Store(&v)
 }
 
 // Default 获取全局默认验证器。
 //
-// 兜底：atomic 指针为空时（理论上只有 init 之前才可能）返回一个可用的默认
-// 验证器，而不是在解引用处空指针崩溃。
+// 兜底：atomic 指针为空或存的是 nil（含 typed-nil，#150 两处判据同口径收敛）
+// 时返回一个可用的默认验证器，而不是在解引用处空指针崩溃。
 func Default() Validator {
 	p := defaultValidator.Load()
-	if p == nil || *p == nil {
+	if p == nil || isNilValidator(*p) {
 		return New()
 	}
 	return *p
+}
+
+// isNilValidator 判定 v 是否为 nil（含 typed-nil，#150）：无类型 nil 直接判等；
+// 指针/映射/切片/通道/函数等可 nil 类型用反射 IsNil 判定——
+// var pv *PlaygroundValidator; SetDefault(pv) 这类 typed-nil 若只判 v == nil
+// 会绕过守卫（接口非空），构造期 fail-fast 落空。
+func isNilValidator(v Validator) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer,
+		reflect.Slice, reflect.UnsafePointer:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 // Validate 验证结构体。

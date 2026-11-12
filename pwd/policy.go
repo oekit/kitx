@@ -150,7 +150,7 @@ func (p Policy) Check(password string) error {
 			Message: fmt.Sprintf("密码须包含%s", strings.Join(missing, "、")),
 		}
 	}
-	if weak, why := weakReason(password); weak {
+	if weak, why := weakReason(password, runes); weak {
 		return &Violation{Kind: KindWeak, Message: why}
 	}
 	return nil
@@ -171,23 +171,35 @@ func containsFunc(runes []rune, f func(rune) bool) bool {
 // 三层判定（纯 Go 零依赖的边界，非熵评估）：
 //
 //  1. 轻量 leet 归一后完全匹配内嵌常见弱口令表（p@ssw0rd → password 同拒）；
-//  2. 弱核心子串（password/qwerty/123456 等）——"MyPassword123!" 同拒；
+//  2. 弱核心子串（password/qwerty/123456 等）——"MyPassword123!" 同拒
+//     （两侧同口径 leet 归一，#146）；
 //  3. 结构性弱模式：全同字符（aaaaaaaa）、单向连续串（12345678/abcdefgh/
 //     87654321）、键盘行连续（qwerty/asdf/zxcv 及其逆序的连续段）。
-func weakReason(password string) (bool, string) {
+//
+// runes 参数是 Check 已算好的 []rune(password)（#140：结构性弱模式判定复用它，
+// 不再各自重做一次 []rune 转换）。
+func weakReason(password string, runes []rune) (bool, string) {
 	lower := strings.ToLower(password)
-	if _, ok := weakIndex()[leetNormalize(lower)]; ok {
+	// leet 归一只做一次（#140）：完全匹配与核心子串两层共用同一归一串——此前
+	// 核心子串循环每轮重算 leetNormalize（weakCores 12 项 = 每密码 12 次冗余
+	// 的逐 rune 字符串分配）。
+	normalized := leetNormalize(lower)
+	if _, ok := weakIndex()[normalized]; ok {
 		return true, "密码过于常见（常见弱口令），请换一个"
 	}
-	for _, core := range weakCores {
-		if strings.Contains(leetNormalize(lower), core) {
+	for _, core := range weakCoresNormalized() {
+		// 两侧同口径归一（#146）：core 比对前与 haystack 一起 leet 归一——
+		// 此前只归一 haystack、core 存未归一原文，凡 core 含被映射字符
+		// （"123456"→"i2eas6"、"abc123"→"abci2e"）在归一 haystack 里
+		// 永远找不到，两条核心永久不可达，注释「归一后包含即拒」名不副实。
+		if strings.Contains(normalized, core) {
 			return true, "密码包含常见弱口令片段，请换一个"
 		}
 	}
-	if sameRune(password) {
+	if sameRune(runes) {
 		return true, "密码为单一字符重复，请换一个"
 	}
-	if consecutiveRun(password) {
+	if consecutiveRun(runes) {
 		return true, "密码为连续字符序列，请换一个"
 	}
 	if keyboardRun(lower) {
@@ -226,8 +238,8 @@ func leetNormalize(s string) string {
 }
 
 // sameRune 判定全同字符（≥ 3 个相同字符即弱，aaaaaaaa / 11111111）。
-func sameRune(password string) bool {
-	runes := []rune(password)
+// runes 由调用方复用传入（#140，weakReason/Check 不再重复转换）。
+func sameRune(runes []rune) bool {
 	if len(runes) < 3 {
 		return false
 	}
@@ -240,9 +252,8 @@ func sameRune(password string) bool {
 }
 
 // consecutiveRun 判定单向连续串（相邻字符恒 +1 或恒 -1，≥ 4 个字符：
-// 12345678 / 87654321 / abcd / hgfe）。
-func consecutiveRun(password string) bool {
-	runes := []rune(password)
+// 12345678 / 87654321 / abcd / hgfe）。runes 由调用方复用传入（#140）。
+func consecutiveRun(runes []rune) bool {
 	if len(runes) < 4 {
 		return false
 	}
@@ -286,11 +297,23 @@ func reverseString(s string) string {
 // keyboardRows 键盘行（小写）。
 var keyboardRows = []string{"qwertyuiop", "asdfghjkl", "zxcvbnm"}
 
-// weakCores 弱核心子串（归一后包含即拒）。
+// weakCores 弱核心子串（原文表；比对前两侧一起 leet 归一，#146——归一形态见
+// weakCoresNormalized）。
 var weakCores = []string{
 	"password", "qwerty", "abc123", "123456", "admin", "letmein",
 	"iloveyou", "welcome", "login", "master", "sunshine", "princess",
 }
+
+// weakCoresNormalized 是 weakCores 的 leet 归一形态（懒建一次，weakIndex 同款
+// 纪律：表只建一次，包级只读共享，无锁热路径；#146 两侧同口径 + #140 不在
+// 判定循环里逐次分配）。
+var weakCoresNormalized = sync.OnceValue(func() []string {
+	out := make([]string, len(weakCores))
+	for i, core := range weakCores {
+		out[i] = leetNormalize(core)
+	}
+	return out
+})
 
 // weakIndex 是内嵌常见弱口令表的归一索引（sync.OnceValue 懒建——表只建
 // 一次，包级只读共享，无锁热路径）。
