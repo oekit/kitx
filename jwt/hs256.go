@@ -48,7 +48,9 @@ func checkSecret(secret []byte) error {
 // 只含 {"alg":"HS256"}，不带 typ。
 func (s *SymmetricSigner) Sign(opts ...SignOption) (string, error) {
 	if s == nil || len(s.secret) == 0 {
-		return "", fmt.Errorf("缺少 HS256 共享密钥")
+		// 哨兵错误（#139）：与 RS256 形态（jwt.go Sign 的错误面）对称——外层可
+		// errors.Is(ErrInvalidToken)，调用方对签名路径的失败可统一分流。
+		return "", fmt.Errorf("%w: 缺少 HS256 共享密钥", ErrInvalidToken)
 	}
 	payload, err := signPayload(opts)
 	if err != nil {
@@ -71,7 +73,9 @@ func (s *SymmetricSigner) Sign(opts ...SignOption) (string, error) {
 // RS256。密钥形态绑定算法，杜绝「用 HMAC 密钥校验非对称签名」的经典 CVE 形态。
 func ParseSymmetric(token string, secret []byte, opts ...ParseOption) (*Claims, error) {
 	if err := checkSecret(secret); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		// 双 %w 保留内层错误链（#139）：%v 会把链拍平成纯文本，调用方无法
+		// errors.Is 穿透内层哨兵（同包 #70 双 %w 纪律的漏网点）。
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	o := &parseOptions{leeway: defaultLeeway}
 	for _, opt := range opts {
