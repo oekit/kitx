@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
@@ -422,7 +421,7 @@ func reservedClaimHits(claims map[string]any) []string {
 			hits = append(hits, k)
 		}
 	}
-	sort.Strings(hits)
+	slices.Sort(hits)
 	return hits
 }
 
