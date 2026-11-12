@@ -392,9 +392,17 @@ func (f *Flow) issueTail(ctx context.Context, u *User, meta SessionMeta) (*Token
 	// 需要 refresh 的 jti 对账；签发产物自证，回读只做提取）。
 	rc, err := f.jwt.ParseTyped(jwt.TokenRefresh, refresh, slices.Clone(f.parseOpts)...)
 	if err != nil {
-		return nil, fmt.Errorf("auth: 回读签发产物失败: %w", err)
+		// 回读失败同样回收（#154）：双令牌此时已签出、未登记——与同函数另
+		// 两条失败分支（会话 ID 生成失败 / Register 失败）同一不变量「签发与
+		// 登记一次落地」，不放行「签了名但不可吊销」的无主令牌（RotateRefresh
+		// 的失败路径注释正是基于此不变量）。回读走 parseOpts 全量校验，签发/
+		// 解析配置不对称（签发无 issuer 而解析钉 ExpectedIssuer、签发
+		// WithNoExpiry 而解析未配 WithAllowNoExpiry 等）时必失败，不能让每次
+		// 失败都静默漏出一对无主令牌。
+		revokeErr := f.revokePair(ctx, "auth: 回收无主令牌", access, refresh)
+		return nil, errors.Join(fmt.Errorf("auth: 回读签发产物失败: %w", err), revokeErr)
 	}
-	sid, err := newSessionID()
+	sid, err := sessionIDGen()
 	if err != nil {
 		revokeErr := f.revokePair(ctx, "auth: 回收无主令牌", access, refresh)
 		return nil, errors.Join(err, revokeErr)
@@ -437,6 +445,10 @@ func (f *Flow) revokePair(ctx context.Context, op, access, refresh string) error
 	}
 	return errors.Join(errs...)
 }
+
+// sessionIDGen 是会话 ID 生成的间接层，仅供测试注入必然失败的桩（uidgen
+// randRead 同款纪律：运行期环境故障的 error 出口要能测，#154 不变量测试用）。
+var sessionIDGen = newSessionID
 
 // newSessionID 生成会话 ID（32 hex，uidgen 集中随机出口；rand 故障显式上抛
 // ——会话 ID 不可降级（空 ID 会撞登记主键），也不 panic（请求路径有 error

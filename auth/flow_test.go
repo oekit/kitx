@@ -216,15 +216,17 @@ func (r registerFailRegistry) Register(_ context.Context, _ authz.Session, _ tim
 // captureRevoker 记录 Revoke 落地次数（黑盒观测回收行为）。
 type captureRevoker struct {
 	authz.Revoker
-	mu   sync.Mutex
-	n    int
-	ttls []time.Duration
+	mu     sync.Mutex
+	n      int
+	ttls   []time.Duration
+	hashes []string
 }
 
 func (c *captureRevoker) Revoke(ctx context.Context, hash string, remaining time.Duration) error {
 	c.mu.Lock()
 	c.n++
 	c.ttls = append(c.ttls, remaining)
+	c.hashes = append(c.hashes, hash)
 	c.mu.Unlock()
 	return c.Revoker.Revoke(ctx, hash, remaining)
 }
