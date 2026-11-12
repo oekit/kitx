@@ -89,7 +89,7 @@ func TestULIDECryptoRandFailure(t *testing.T) {
 // #141：ULIDFromTimeE 的入参越界仍按 panic 口径（调用方 bug，与 checkHexArgs
 // 防呆分层一致）——只有 crypto/rand 故障走 error。
 func TestULIDFromTimeEOutOfRangePanics(t *testing.T) {
-	assertPanicContains(t, "ULIDFromTimeE", "超出 48 bit", func() { ULIDFromTimeE(time.UnixMilli(-1)) })
+	assertPanicContains(t, "ULIDFromTimeE", "超出 48 bit", func() { _, _ = ULIDFromTimeE(time.UnixMilli(-1)) })
 }
 
 // assertPanicContains 断言 fn panic 且消息包含 want（panic 版委托测试共用）。
