@@ -425,7 +425,14 @@ func reservedClaimHits(claims map[string]any) []string {
 	return hits
 }
 
-// mapTime 取数字时间声明（缺失或类型异常返回 nil）。
+// mapTime 取数字时间声明（缺失、类型异常或值为 0 返回 nil）。
+//
+// 零值视作「无此声明」（#149）：与上游 golang-jwt parseNumericDate 口径对齐——
+// JSON 数字 0（如 "exp":0）是占位缺省，不是「1970 纪元」。缺省强制 exp（#135）
+// 时 exp=0 的令牌同样被上游按「无 exp」拒绝；WithAllowNoExpiry 豁免放行后
+// Claims.ExpiresAt 必须与库自身判定同向（nil），否则消费方惯用的
+// 「ExpiresAt != nil 即已过期」判据在这类令牌上被反转成「1970 年就过期」。
+// exp/iat/nbf 共用本函数，三个声明的零值同口径。
 func mapTime(mc gojwt.MapClaims, key string) *gojwt.NumericDate {
 	v, ok := mc[key]
 	if !ok {
@@ -433,8 +440,14 @@ func mapTime(mc gojwt.MapClaims, key string) *gojwt.NumericDate {
 	}
 	switch n := v.(type) {
 	case float64:
+		if n == 0 {
+			return nil
+		}
 		return gojwt.NewNumericDate(time.Unix(int64(n), 0))
 	case int64:
+		if n == 0 {
+			return nil
+		}
 		return gojwt.NewNumericDate(time.Unix(n, 0))
 	default:
 		return nil

@@ -92,12 +92,18 @@ func NewManagerRS256(kp *KeyPair) (*Manager, error) {
 
 // NewManagerHS256 用共享密钥构造 HS256 形态 Manager（密钥强度判据与
 // NewSymmetric 完全一致：≥ 32 字节，RFC 7518 §3.2）。
+//
+// secret 即刻拷贝（#147）：签发路径（hs256Codec.sign → SymmetricSigner.Sign）与
+// 校验路径（hs256Codec.parse → ParseSymmetric）必须持有**同一块**密钥材料——
+// 此前校验器拿的是调用方原切片，调用方构造后原地改写 buffer（清零、缓冲复用、
+// 配置热加载覆盖——安全卫生常见做法，正是 NewSymmetric 注释声明要防的场景）
+// 会让 Manager 进入「签得出、验不过」状态。
 func NewManagerHS256(secret []byte) (*Manager, error) {
 	s, err := NewSymmetric(secret)
 	if err != nil {
 		return nil, err
 	}
-	return &Manager{codec: hs256Codec{s: s, secret: secret}}, nil
+	return &Manager{codec: hs256Codec{s: s, secret: append([]byte(nil), secret...)}}, nil
 }
 
 // IssuePair 成对签发 access+refresh 双令牌：同 subject，各自带 token_type 分型
@@ -191,8 +197,13 @@ func (m *Manager) Refresh(refreshToken string, ttlAccess, ttlRefresh time.Durati
 	if old.Issuer != "" {
 		base = append(base, WithIssuer(old.Issuer))
 	}
-	if len(old.Audience) > 0 {
-		base = append(base, WithAudienceClaims(old.Audience...))
+	// aud 继承前过滤空串（#148）：old.Audience 是运行期从令牌解出的内容，不是
+	// 调用方配置——WithAudienceClaims 是构造期 fail-fast（空受众 panic，#117），
+	// 喂运行期数据等于让令牌内容（HS256 共享密钥形态下同密钥任一签发方可造
+	// aud:[""]）击穿请求链。空受众在 WithAudience（#66）fail-closed 校验下永不
+	// 匹配，过滤丢弃不缩小可匹配面；全为空串则不继承 aud（零参与不设置同效）。
+	if aud := nonEmptyAud(old.Audience); len(aud) > 0 {
+		base = append(base, WithAudienceClaims(aud...))
 	}
 	for k, v := range old.Extra {
 		if k == TokenTypeClaim {
@@ -240,4 +251,15 @@ func setsJTI(opts []SignOption) bool {
 		opt(probe)
 	}
 	return probe.jti != ""
+}
+
+// nonEmptyAud 过滤受众里的空串（Refresh 的 aud 继承专用，#148）。
+func nonEmptyAud(aud []string) []string {
+	out := make([]string, 0, len(aud))
+	for _, a := range aud {
+		if a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
