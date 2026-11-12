@@ -214,3 +214,34 @@ func TestParseSymmetricWithAudience(t *testing.T) {
 		t.Fatalf("mismatched audience must wrap ErrInvalidToken, got %v", err)
 	}
 }
+
+// #159：HS256 主路径的 exp 强制负例（镜像 RS256 TestParseRequiresExpiry，
+// jwt_test.go:405-428）——ParseSymmetric 与 Parse 共用 newParser 的强制逻辑，
+// 但护栏此前只钉了 RS256 侧；zeus 平台消费的正是 HS256 路径，缺 exp 必拒的
+// 安全缺省必须在本入口有直接断言，防止未来两入口分型重构时静默丢失。
+func TestParseSymmetricRequiresExpiry(t *testing.T) {
+	secret := testHS256Secret(t)
+	// 手工构造无 exp 令牌（Sign/IssuePair 会按 #65/#135 注入 exp，绕开它）。
+	tok := gojwt.NewWithClaims(gojwt.SigningMethodHS256, gojwt.MapClaims{"sub": "u"})
+	tok.Header = map[string]any{"alg": "HS256"}
+	noExp, err := tok.SignedString(secret)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+
+	_, err = ParseSymmetric(noExp, secret)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("ParseSymmetric(no-exp) must wrap ErrInvalidToken, got %v", err)
+	}
+	if !errors.Is(err, gojwt.ErrTokenRequiredClaimMissing) {
+		t.Fatalf("ParseSymmetric(no-exp) must wrap ErrTokenRequiredClaimMissing, got %v", err)
+	}
+
+	claims, err := ParseSymmetric(noExp, secret, WithAllowNoExpiry())
+	if err != nil {
+		t.Fatalf("ParseSymmetric(no-exp, WithAllowNoExpiry) error = %v, want nil", err)
+	}
+	if claims.Subject != "u" {
+		t.Fatalf("Subject = %q, want u", claims.Subject)
+	}
+}
