@@ -1,3 +1,7 @@
+## [v0.9.1] — 2026-11-13
+
+- 9 单修复批：isNilValidator 反射判据（#150）、mapTime n==0→nil（#149）、Refresh 空串过滤（#148）、HS256 secret 拷贝（#147）、weakCores 预归一（#146）、uidgen logx 收编（#145）、ULIDE 补齐（#141）、leetNormalize 提出（#140）、ErrInvalidToken 哨兵（#139）；地板对齐 pkg v0.47.0。
+
 ## [v0.9.0] — 2026-11-12
 
 - **BREAKING** feat(jwt): 解析侧缺省强制 exp（#135）——签发侧「永不过期令牌是最危险的缺省」（WithTTL(0) panic，#65）的解析侧闭环：golang-jwt v5 仅在 exp 存在时校验，无 exp 令牌此前缺省放行，#65 纪律在消费面单侧失效；现 Parse/ParseSymmetric/Manager.ParseTyped 对无 exp 令牌一律拒绝（底层 ErrTokenRequiredClaimMissing 可 errors.Is），确有消费无 exp 令牌的场景显式用新增 `WithAllowNoExpiry()` ParseOption 豁免（对偶签发侧 WithNoExpiry，名字即审计信号）。**缺省行为变更：此前可解析的无 exp 令牌现在被拒**——库自签发（恒带 exp）的链路不受影响
