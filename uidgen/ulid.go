@@ -39,7 +39,7 @@ var ulidDecoding = func() [256]byte {
 	for i := range t {
 		t[i] = 0xFF
 	}
-	for i := 0; i < len(ulidEncoding); i++ {
+	for i := range len(ulidEncoding) {
 		c := ulidEncoding[i]
 		t[c] = byte(i)
 		t[c|0x20] = byte(i)
@@ -164,7 +164,7 @@ func encodeULID(ts int64, entropy [ulidEntropySize]byte) string {
 // 会静默错位。
 func encodeULIDTimestamp(dst []byte, ts int64) {
 	v := uint64(ts) & ulidTimestampMask
-	for i := 0; i < ulidTimestampChars; i++ {
+	for i := range ulidTimestampChars {
 		dst[i] = ulidEncoding[(v>>uint(ulidTimestampChars*5-5-5*i))&0x1F]
 	}
 }
