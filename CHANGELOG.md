@@ -1,3 +1,9 @@
+## [v0.9.3] — 2026-11-13
+
+- jwt/uidgen/pwd/validator 批：HS256 哨兵与 %w（#139）、weakReason 归一化缓存（#140）、ULID E 变体（#141）、uidgen 改 logx（#145）、弱核心子串双侧归一（#146）、HS256 secret 拷贝（#147）、Refresh aud 空串过滤（#148）、exp=0 对齐上游（#149）、SetDefault typed-nil 守卫（#150）、issueTail 失败回收令牌（#154）、auth 新单修复（#159）
+
+关联问题单：kitx#139、kitx#140、kitx#141、kitx#145、kitx#146、kitx#147、kitx#148、kitx#149、kitx#150、kitx#154、kitx#159。
+
 ## [v0.9.2] — 2026-11-13
 
 - test(jwt): HS256 主路径补 exp 强制负例——镜像 RS256 TestParseRequiresExpiry（#159）。ParseSymmetric 与 Parse 共用强制逻辑，护栏此前只钉 RS256 侧；zeus 消费的恰是 HS256 路径。纯测试增量零实现改动。
